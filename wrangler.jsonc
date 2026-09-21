@@ -10,7 +10,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "country-road",
+  "name": "billboard",
   "compatibility_date": "2026-08-25",
   "preview_urls": false,
 
