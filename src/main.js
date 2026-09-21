@@ -4,6 +4,12 @@ import { RoadPath } from './road/spline.js';
 import { ChunkField } from './world/chunks.js';
 import { Scatter } from './world/scatter.js';
 import { Furniture } from './road/furniture.js';
+import { Junctions } from './road/junctions.js';
+import { BILLBOARDS } from './road/billboards.js';
+import { Signs } from './road/signs.js';
+import { Portals } from './road/portal.js';
+import { Depart } from './core/depart.js';
+import { Warp } from './core/warp.js';
 import { Sky } from './world/sky.js';
 import { setAnisotropy } from './core/textures.js';
 import { PAL } from './core/palette.js';
@@ -70,6 +76,28 @@ const resumable = stored && (!params.has('seed') || stored.seed === params.get('
 
 const seedText = params.get('seed') || (resumable && resumable.seed) || 'country';
 const SEED = /^\d+$/.test(seedText) ? Number(seedText) : hashString(seedText);
+
+/**
+ * Did this page load come back through a gate, and which one?
+ * `prompt_19.md` item 2.
+ *
+ * Read here, before anything is built, because the answer decides where
+ * the car starts and the side road it starts on has to be sited before
+ * the first ground is meshed.  Consumed whether or not it is honoured, so
+ * a reload on the far side of a diversion does not replay the arrival.
+ *
+ * Honoured only with a save for the same world: the flag says *which*
+ * gate, and the cookie says *where the drive was* -- a gate id from one
+ * seed is somebody else's side road in another.  `gate` is null for a
+ * flag from before the id was written into it, which still plays the
+ * arrival, on the main road, exactly as it used to.
+ */
+const arrival = (() => {
+  const back = Warp.cameBack();
+  if (!back || !resumable) return null;
+  if (back.id === null) return { gate: null };
+  return back.seed === resumable.seed ? { gate: back.id, s: back.s } : null;
+})();
 
 /* --------------------------------- time ---------------------------------- *
  * **Every drive starts on a spring morning**, and that is `prompt_5.md`
@@ -348,6 +376,18 @@ const chunks = new ChunkField(scene, terrain, road, {
  * `?lead=1` pins the old behaviour, which is how the rebuild path gets
  * exercised.
  */
+/**
+ * How far ahead of the car a billboard may be sited.  See the note on
+ * `junctions.update` in `tick`, which is where the 880 is argued for.
+ *
+ * Named and published on `__game` rather than written inline because it
+ * is not only this file's business: it is the number that decides how
+ * much warning a sign gives, and `tools/probe/sign.mjs` measures that.  A
+ * probe that hard-coded its own copy would agree with this one until the
+ * day somebody tuned it.
+ */
+const SITING_LEAD = 880;
+
 const NEED = () => chunks.reach() + 250;
 const LEAD_PIN = Number(params.get('lead') || 0);
 const LEAD_MAX = 3;
@@ -356,6 +396,63 @@ let roadLead = NEED();
 road.extend(0, LEAD_PIN ? NEED() * LEAD_PIN : NEED() * 1.6, 20000, 600);
 const scatter = new Scatter(scene, terrain, road, { seed: SEED });
 const furniture = new Furniture(scene, terrain, road);
+/* --- the billboards, and the turnings that go with them ---------------
+ *
+ * `?signs=off` takes them out of the world entirely, which is what the
+ * before-and-after in `tools/probe/crease.mjs` and `paint.mjs` needs: the
+ * junctions are a second road in a height field written for one, and the
+ * only honest way to say they cost nothing is to measure the same seed
+ * with and without them.
+ *
+ * The order of the three lines matters and none of it is arbitrary.
+ * `Junctions` reads the road; `terrain.junctions` is what puts a spur
+ * into the height field, and it must be set *after* the field is built
+ * or `Terrain.bareAt` and `coarseAt` -- which siting reads -- would be
+ * answering about ground that already had a turning in it.  And
+ * `furniture.junctions` is what opens the guardrail for a mouth. */
+/**
+ * `?bb=N`: pretend the list has N more entries in it.
+ *
+ * `prompt_18.md` item 7 does not just ask for two more billboards, it
+ * asks to *test that if I add more billboards in src/road/billboards.js
+ * manually, everything just works without additional changes*.  That is a
+ * claim about a list of unknown length, and the only honest way to check
+ * it is to run one.
+ *
+ * The hook lives here rather than in `billboards.js`, which stays what it
+ * says it is: data, and nothing that knows a game is reading it.  The
+ * entries have no image, which exercises the path a real edit will hit
+ * first -- `signs.js` logs the missing file and shows the caption band --
+ * and names of increasing length, which is what the caption fitter is
+ * for.  `tools/probe/sign.mjs --extra N` drives it.
+ */
+const EXTRA = Math.max(0, Math.min(60, Number(params.get('bb') || 0) | 0));
+for (let i = 0; i < EXTRA; i++) {
+  const n = BILLBOARDS.length + 1;
+  BILLBOARDS.push({
+    id: 1000 + i,
+    name: ['Test', 'Longer Test Name', 'A Really Very Long Billboard Name'][i % 3]
+          + ' ' + n,
+    image: `billboards/does-not-exist-${n}.jpg`,
+    link: `https://example.invalid/${n}`,
+  });
+}
+
+const junctions = new Junctions(terrain, road, {
+  enabled: (params.get('signs') || 'on') !== 'off',
+  seed: SEED,
+});
+terrain.junctions = junctions;
+furniture.junctions = junctions;
+const signs = new Signs(scene, terrain, junctions);
+/* The gates at the far end of every turning, and the thing that made a
+ * side road worth building properly.  See `road/portal.js`. */
+const portals = new Portals(scene, terrain, junctions);
+const depart = new Depart();
+/* `?nogo=1` arms the departure card and never navigates -- see
+ * `core/depart.js`.  The recorder sets it unconditionally, because a film
+ * that drives past a turning should not end there. */
+depart.dry = params.has('nogo') || RECORDING;
 const sky = new Sky(scene, VIEW * 1.12);   // inside camera.far, deliberately
 /* The volumetric layer.  `?clouds=off` puts the bare dome back, which the
  * seam probe needs; `?clouds=full` marches at full resolution, which is
@@ -505,7 +602,12 @@ const sound = new Sound({
   disabled: RECORDING,
   forced: params.get('sound') === '0' ? false : params.get('sound') === '1' ? true : null,
 });
-hud.setHint('W A S D  drive     SPACE  handbrake     DRAG  look     SCROLL  distance     T  back to the road     F  autodrive     [ ]  time     Z  rest     C  camera     M  sound     H  hud     ESC  menu');
+const DRIVE_HINT = 'W A S D  drive     SPACE  handbrake     DRAG  look     SCROLL  distance     T  back to the road     F  autodrive     [ ]  time     Z  rest     C  camera     M  sound     H  hud     ESC  menu';
+/** What a drive that starts parked on a side road says instead, until
+ *  the player pulls away.  One instruction, because at that moment there
+ *  is exactly one thing to do. */
+const PARKED_HINT = 'W  release the handbrake and drive     DRAG  look     H  hud     ESC  menu';
+hud.setHint(DRIVE_HINT);
 
 /* And the same controls for a device with no keys.
  *
@@ -548,9 +650,15 @@ const touch = RECORDING ? { enabled: false } : new TouchControls(input, {
  * bookmark, or an F5 four miles later comes back to the ordinary screen
  * with its continue/new choice rather than silently resuming for you.
  */
+/*
+ * And a return through a gate is an answer too.  The load screen would
+ * otherwise put *continue / new drive* between the white-out and the side
+ * road, which is a question the back button has already answered and a
+ * click in the middle of what should read as one motion.
+ */
 const loader = new Loader({
   skipped: RECORDING || params.has('auto'),
-  autoStart: params.has('go'),
+  autoStart: params.has('go') || !!arrival,
 });
 if (params.has('go')) {
   const clean = new URLSearchParams(location.search);
@@ -599,6 +707,102 @@ let troubleFor = 0;
  * just rolled the car is exactly the player who has not read the hint
  * line.
  */
+/**
+ * The car's address on the road, which is not always a question the road
+ * can answer.
+ *
+ * `RoadPath.nearest` gives up beyond `MAX_QUERY`, which is 46 m, and a
+ * side road is up to ninety-two.  So from the moment the wheels are half
+ * way down a spur the honest answer is null -- and what was here read
+ * `q ? q.s : 0`, which is not null, it is **the origin**.  Arc position is
+ * the road's address: `protect`, `extend`, the chunk field's forward
+ * bias, `furniture`, `signs` and the save cookie all take it from here, so
+ * a car forty-seven metres down a turning was quietly protecting,
+ * extending, furnishing and saving a kilometre of road it was nowhere
+ * near.  It did not show, because until this iteration the link fired
+ * twenty-two metres in and the page left.  With a portal at the far end,
+ * and a drive that *starts* parked at one, it is the first thing that
+ * happens.
+ *
+ * Two answers, in order.  If the car is on a spur, the address is **the
+ * mouth that spur hangs off** -- which is true, useful, and the same
+ * place a resume from the link lands.  Failing that, whatever the road
+ * last said, because a car that has driven off into a field has not moved
+ * to the origin either.
+ *
+ * Deliberately not a third `Midline`: `plan_17.md` §1a is still right that
+ * `nearest` must never hand back an arc position on a stub.  This is the
+ * one consumer that knows turnings exist saying so out loud, rather than
+ * a sentinel leaking into five of them.
+ */
+let lastS = 0;
+/** `Junctions.onSpur` writes into this rather than allocating a result
+ *  object every frame for a question whose answer is almost always no. */
+const _spur = {};
+/** Where the car was last frame, for the gate crossing.  Seeded at boot
+ *  and after every teleport, so a rescue or a resume cannot be read as a
+ *  three-kilometre step through a portal. */
+const _prev = { x: 0, z: 0 };
+
+/**
+ * The handbrake the drive starts on.  `prompt_18.md` item 6.
+ *
+ * `vehicle.js` already applies a parking brake to a car nobody is
+ * driving, so the car would not roll away without this.  What this adds
+ * is that the state is *declared*: the HUD says `parked`, the hint line
+ * says how to leave, and the car is held until the player asks for it not
+ * to be -- rather than being still because nothing has happened yet.
+ *
+ * Released by throttle or brake and never re-applied, because a handbrake
+ * that comes back on when you coast to a stop is a handbrake nobody
+ * asked for.  Steering does not release it: a player looking around
+ * before setting off is still parked.
+ */
+const PARKED_AXES = { throttle: 0, brake: 0, steer: 0, handbrake: 1 };
+let parkBrake = false;
+function releaseParkBrake(manual) {
+  if (manual.throttle > 0 || manual.brake > 0) {
+    parkBrake = false;
+    hud.setHint(DRIVE_HINT);
+    return true;
+  }
+  return false;
+}
+
+function arcOf(q) {
+  if (q) { lastS = q.s; return lastS; }
+  const j = junctions.arcFor(car.pos.x, car.pos.z);
+  if (j !== null) lastS = j;
+  return lastS;
+}
+
+/**
+ * Park the car on a side road, a few metres short of its gate and facing
+ * the mouth.
+ *
+ * The main road is ahead through the windscreen and the portal is in the
+ * mirror, which is the one arrangement where "drive out, and come back
+ * through it later" needs no explaining.  Four callers since
+ * `prompt_19.md`: a fresh drive, the boot's re-place after settling, a
+ * return through the back button, and a return from the back/forward
+ * cache -- and there used to be three copies of the first two.
+ *
+ * `_prev` is in here and not left to the caller, because forgetting it is
+ * a segment from wherever the car was swept through whatever lies between
+ * -- possibly a gate.
+ */
+function parkOn(j) {
+  const a = Math.max(6, j.portalA - 9);
+  const p = j.pointAt(a, {});
+  car.placeAt(p.x, p.y, p.z, Math.atan2(-p.tz, -p.tx));
+  startS = j.s;
+  lastS = j.s;
+  parkBrake = true;
+  hud.setHint(PARKED_HINT);
+  chase.started = false;
+  _prev.x = car.pos.x; _prev.z = car.pos.z;
+}
+
 function recover() {
   const near = road.nearest(car.pos.x, car.pos.z, {});
   car.placeOn(road, near ? near.s : auto.s);
@@ -627,7 +831,24 @@ function recover() {
  * mode that had just engaged does nothing at all.  It lasted one frame,
  * every time, and looked precisely like a key that does not work.
  */
+/**
+ * The autopilot follows the main line, and a spur is not on it.
+ *
+ * `Autodrive` steers toward `road.sampleAt(s + lookahead)`, so engaging
+ * it on a side road aims the car at a road forty metres sideways through
+ * a hedge.  Since `prompt_18.md` item 6 a drive *starts* on a spur, so
+ * this is reachable on the first keypress of a new game rather than being
+ * a curiosity.
+ */
+function onSpurNow() {
+  return junctions.arcFor(car.pos.x, car.pos.z) !== null;
+}
+
 function cycleAuto() {
+  if (onSpurNow()) {
+    hud.toast('not on a side road', simTime);
+    return;
+  }
   const was = auto.mode;
   const name = auto.cycle();
   if (auto.mode > 0) input.armTakeover();
@@ -662,6 +883,7 @@ function handbrakeOff() {
  */
 let parked = true;
 function badge(axes) {
+  if (parkBrake) return 'parked';
   if (auto.mode > 0) { parked = false; return auto.name; }
   const v = Math.abs(car.speed);
   if (parked) { if (axes.throttle > 0 || axes.brake > 0 || v > 0.8) parked = false; }
@@ -871,6 +1093,44 @@ function rest() {
  * **The save goes first**, so a player who quits the tab from the menu
  * loses nothing.
  * ------------------------------------------------------------------------ */
+/* The forced save on the way out of the tab, wired to the departure card.
+ *
+ * Same argument as `openMenu` below and the same call: this may be the
+ * last thing that happens here, and the throttle is two seconds.  Without
+ * it, following a billboard costs the player up to two seconds of drive
+ * and the browser's back button lands them short of where they turned. */
+depart.onLeave = () => {
+  if (RECORDING) return;
+  save.write(record(), simTime, true);
+};
+
+/**
+ * What goes in the cookie, and the `s` in it is not `auto.s`.
+ *
+ * `Autodrive.sync` is the only thing that writes `auto.s`, and it runs
+ * only while the autopilot is *holding* something -- so for a player who
+ * never presses `F`, which is the default mode, it holds whatever it was
+ * set to when the drive began.  Every save written on a manual drive
+ * recorded the starting arc position, and every resume put the car back
+ * at the start of the road it had just driven twenty miles of.
+ *
+ * It is not a new fault, but this iteration is what makes it matter: the
+ * whole of `prompt_18.md` item 3 is a round trip through a link, and the
+ * page that comes back reads this cookie.  Coming back to the origin
+ * instead of to the turning you left by would be the feature not working.
+ *
+ * `lastS` is the car's own address, maintained every frame by `arcOf` --
+ * including the case where the car is on a side road and the main line
+ * cannot answer at all.  The throttled save in the frame loop was always
+ * right, because it had the frame's own `s` to hand; it now goes through
+ * here as well, so there is one answer to the question rather than two
+ * that agree by luck.
+ */
+function record() {
+  return { seed: seedText, t: clock.t, s: lastS, odometer,
+           camera: chase.mode, auto: auto.name };
+}
+
 let paused = false;
 async function openMenu() {
   if (paused || loader.skipped || !loader.el) return;
@@ -878,8 +1138,7 @@ async function openMenu() {
   /* Forced, not throttled: this may be the last thing that happens before
    * the tab is closed. */
   if (!RECORDING) {
-    save.write({ seed: seedText, t: clock.t, s: auto.s, odometer,
-                 camera: chase.mode, auto: auto.name }, simTime, true);
+    save.write(record(), simTime, true);
   }
   /* The *live* state, not the saved one -- see `Loader.pause`. */
   const miles = (odometer / 1609.344).toFixed(1);
@@ -900,6 +1159,20 @@ async function openMenu() {
 
 function command(cmd) {
   if (cmd === 'menu') {
+    /**
+     * `Esc` during a crossing is **the** way to refuse a portal, and the
+     * only one.
+     *
+     * Braking and steering used to refuse as well, and that turned out to
+     * mean a wobble on a side road killed the gate -- see
+     * `Junctions.crossedGate`.  With those gone, a player who drove
+     * through a portal by accident needs one thing that works, needs to
+     * be told what it is while it still works, and must not be able to
+     * trip it with the pedals.  It cancels rather than opening the pause
+     * menu because a player reaching for `Esc` mid-crossing means *not
+     * that*, not *pause*.
+     */
+    if (warp && warp.cancel()) return;
     openMenu();
   } else if (cmd === 'autodrive') {
     cycleAuto();
@@ -1040,6 +1313,11 @@ function paintWorld(dt, w, { moving = true, braking = false } = {}) {
 
   headlights.update(clock, car, w.wetness);
   headlights.paint(coupe, braking);
+  /* The billboards change over with the headlights, off the same ambient
+   * level: the faces are unlit and readable at every hour, and this takes
+   * a little off them after dark so a lit panel reads as a lit panel
+   * rather than as a hole cut in the night.  See `Signs.setLight`. */
+  signs.setLight(atmos.light);
 }
 
 /**
@@ -1155,7 +1433,7 @@ function tick(dt) {
    * a couple of kilometres is free; what is not free is a chunk that has
    * to be thrown away and rebuilt once the road arrives. */
   const q = road.nearest(car.pos.x, car.pos.z, _near);
-  const s = q ? q.s : 0;
+  const s = arcOf(q);
   /* **Which way along the road the car is pointing.**
    *
    * The arc coordinate is signed since `prompt_5.md` item 4, so "ahead"
@@ -1178,7 +1456,38 @@ function tick(dt) {
    * that loops back on itself from tracing for ever. */
   /* What the tracers may not take back.  Before the extend, so a revert
    * inside this frame's tracing already knows. */
-  road.protect(s);
+  /* **920, not the default 400**, and the number is set by the billboards
+   * rather than by the tracer.  See the note on `junctions.update` below. */
+  road.protect(s, SITING_LEAD + 40);
+  /**
+   * Site any billboard whose ground is now safe to build on.
+   *
+   * Two constraints meet on this one number and they pull opposite ways.
+   *
+   * A junction may only be sited *inside the tracer's protected window*,
+   * because a revert outside it can pull the road out from under one --
+   * and what that leaves is a sign standing beside a field and a spur
+   * leaving nothing.  That argues for a small limit.
+   *
+   * But siting is not instant: `Junctions` gathers candidates across the
+   * whole window between 1500 and 3000 feet past the last turning
+   * (`prompt_19.md` item 1) and commits the best, so a turning is decided
+   * when the scan has reached `target + W`, W = 457 m, and its sign stands
+   * 120 m *behind* the mouth.  Working it through, the car is at
+   * `limit - W` when a junction commits and the sign is at `target - 120`
+   * at worst, so the warning the player actually gets is
+   * `limit - 120 - W` metres.
+   *
+   * At the 380 that was here first, with a 250 m window, that was
+   * **twenty metres** -- the sign would appear beside the car.  660 gave
+   * 290 m against that window, and against this one would give 83.  880
+   * gives 303 m, which is where a 12.8 m panel becomes legible, so a
+   * billboard fades up out of the distance instead of arriving.  The
+   * protected margin above has to cover it, which is what makes 920 the
+   * tracer's number.
+   */
+  junctions.update(s + SITING_LEAD);
+  const junctionBoxes = junctions.takeNewBoxes();
   const need = NEED();
   /* **Both ways.**  `prompt_5.md` item 4 gave the road a backward half, so
    * there are two tails and the servo watches whichever one the car is
@@ -1214,9 +1523,33 @@ function tick(dt) {
   /* Four boxes, not two: one dirty and one laid **per line**.  Merging
    * the two lines' boxes into one spans the whole road and invalidates the
    * ground under the car -- see `RoadPath.laidBoxes`. */
-  for (const box of [...road.takeDirtyBoxes(), ...road.takeLaidBoxes()]) {
+  /* Three sources now, and the third is a turning that has just appeared
+   * in ground the field had already meshed.  Siting runs 380 m ahead and
+   * the field builds further out than that, so it happens on nearly every
+   * junction; nothing else would ever rebuild those chunks, because
+   * `_relod` reacts only to a change of resolution and ground beside the
+   * road was at 1 m spacing to begin with.  See `Junctions.newBoxes`. */
+  for (const box of [...road.takeDirtyBoxes(), ...road.takeLaidBoxes(),
+                     ...junctionBoxes.map((b) => b.ground)]) {
     if (box) chunks.invalidate(box.minX - 64, box.minZ - 64, box.maxX + 64, box.maxZ + 64);
   }
+  /* And the trees, which are a separate cache with a separate lifetime.
+   * A wood scattered before the turning was there has a conifer in the
+   * carriageway and one in front of the sign, and nothing else would ever
+   * move them: a scatter chunk is built once and dropped only when it
+   * goes out of range.  Only the junction boxes -- the road arriving is
+   * already handled, because trees are placed against `road.nearest` and
+   * a chunk the road reaches was planted after it got there. */
+  for (const { clear } of junctionBoxes) {
+    scatter.invalidate(clear.minX, clear.minZ, clear.maxX, clear.maxZ);
+  }
+  /* And the guardrail, which is the same fault a third time: a turning is
+   * routinely sited inside furniture that has already been built, and
+   * `Furniture.update` only ever builds spans it does not already have.
+   * What it leaves is a barrier across the mouth -- and since `plan_4`
+   * the rail is the collider, so it is a barrier you cannot drive
+   * through.  `sign.mjs` counted one of these on `alder`. */
+  for (const { s: js } of junctionBoxes) furniture.invalidateArc(js - 40, js + 40);
 
   /* 2. controls.
    *
@@ -1232,7 +1565,28 @@ function tick(dt) {
   const manual = input.sample(dt);
   const held = input.active();
   if (auto.mode > 0 && input.handbrakePulled()) handbrakeOff();
-  const axes = auto.mode > 0 ? auto.update(dt, held ? manual : null) : manual;
+  /**
+   * Three things can be driving, and they are asked in this order.
+   *
+   * The **warp** first, because once the car is through a gate the player
+   * is a passenger: it returns zeroed axes with the handbrake on and the
+   * car coasts to a stop while the frame is pulled into the portal.
+   *
+   * The **handbrake at the start of a drive** second.  `prompt_18.md`
+   * item 6 asks to *start the game with the car in "parked" state as if
+   * the handbrake is on*, and the car's own parking brake already holds
+   * it -- what this adds is that the state is real and visible until the
+   * player asks for it to end, rather than being an artefact of nobody
+   * having pressed anything yet.  Any throttle releases it, on that
+   * frame, and it never comes back.
+   *
+   * The **autopilot** last, exactly as before.
+   */
+  const warped = warp ? warp.update(dt) : null;
+  let axes;
+  if (warped) axes = warped;
+  else if (parkBrake) axes = releaseParkBrake(manual) ? manual : PARKED_AXES;
+  else axes = auto.mode > 0 ? auto.update(dt, held ? manual : null) : manual;
   hud.setMode(badge(axes));
 
   /* 3. the car -- and the ground it is standing on has to be in the
@@ -1242,6 +1596,7 @@ function tick(dt) {
   physics.syncTerrain(chunks, car.pos.x, car.pos.z);
   physics.syncRails(furniture, road, car.pos.x, car.pos.z);
   physics.syncTrees(scatter, car.pos.x, car.pos.z);
+  physics.syncPosts(signs, car.pos.x, car.pos.z);
   car.update(dt, axes);
   car.applyTo(coupe.group);
   /* The wheels, on three channels that must not be the same object -- see
@@ -1264,6 +1619,55 @@ function tick(dt) {
   chunks.update(car.pos.x, car.pos.z, fx, fz, dt);
   scatter.update(car.pos.x, car.pos.z);
   furniture.update(Math.max(0, s - 200), s + 620);
+  signs.update(Math.max(0, s - 260), s + 620);
+  /* A different window from the signs', because a gate stands at the far
+   * end of a spur and a sign stands `SIGN_LEAD` before the mouth -- so
+   * they are built against where each of them actually is. */
+  portals.update(Math.max(0, s - 300), s + 620, dt);
+
+  /* --- and the turning, if the player has taken one --------------------
+   *
+   * `onSpur` is the same four conditions it always was, and the heading
+   * test is still the one that matters: without it a car that spins on
+   * the apron, or a player who parks in the mouth to read the sign, is
+   * sent to a website.  What is new is that it answers *two* questions --
+   * on the spur, and through the gate -- because `prompt_18.md` item 3
+   * moves the commitment from a countdown to a place.
+   *
+   * `refused` is the other half.  Braking is how a driver says no to a
+   * turning they are already in, and it has to be read here rather than
+   * inside `Depart` because this is where the pedals are.  It stops
+   * mattering the moment the car is through the gate, which is the point
+   * of a gate. */
+  const crossing = warp && warp.active;
+  const on = crossing
+    ? null
+    : junctions.onSpur(car.pos.x, car.pos.z, car.yaw, car.speed, _spur);
+  depart.update(dt, on);
+  /* And the gate itself, which is a **crossing rather than a place**: the
+   * segment the car moved along this frame against the disc of the ring.
+   * See `Junctions.crossedGate` for why it is not five conditions about
+   * where the car is -- the short version is that four of those five can
+   * be false for a single frame of ordinary driving, and the fifth was an
+   * armed flag that a single false frame cleared. */
+  /* A teleport is not a crossing.  The car is put back on the road by
+   * the rescue, by a resume and three times during the boot, and a
+   * segment drawn from where it *was* to where it now is would sweep
+   * through whatever lay between -- including, on a bad day, a gate.
+   * Twenty metres in one frame is 1200 m/s; the fastest real step this
+   * game can take is under a metre. */
+  const stepped = Math.hypot(car.pos.x - _prev.x, car.pos.z - _prev.z);
+  const gate = crossing || stepped > 20
+    ? null
+    : junctions.crossedGate(_prev.x, _prev.z, car.pos.x, car.pos.z);
+  if (gate && depart.commit(gate)) {
+    if (warp) warp.begin(gate, portals.centre(gate));
+    else depart.navigate(gate.billboard);
+  }
+  _prev.x = car.pos.x; _prev.z = car.pos.z;
+  /* The touch screen's `Esc`.  On screen only while there is something to
+   * cancel, which is the two seconds a crossing lasts. */
+  if (touch.setAborting) touch.setAborting(!!(warp && warp.leaving));
 
   paintWorld(dt, w, { moving: true, braking: axes.brake > 0.1 });
   listen(dt, w, axes, false);
@@ -1288,12 +1692,7 @@ function tick(dt) {
   /* The save, throttled to once every couple of seconds.  It stores a
    * seed and two positions and nothing derived, because everything else
    * in the world is a pure function of those. */
-  if (!RECORDING) {
-    save.write({
-      seed: seedText, t: clock.t, s, odometer,
-      camera: chase.mode, auto: auto.name,
-    }, simTime);
-  }
+  if (!RECORDING) save.write(record(), simTime);
 }
 
 /* --------------------------------- loop ---------------------------------- */
@@ -1305,6 +1704,67 @@ function tick(dt) {
  * exactly like a sky with no world in it. */
 const pipeline = CEL ? new Pipeline(renderer, scene, camera,
   { maxScale: Q.scale }) : null;
+
+/**
+ * The crossing.  `prompt_18.md` item 3's *travelling through space and
+ * time*, and the thing that takes the wheel while it happens.
+ *
+ * Null under `?flat`, where there is no pipeline to put a screen-space
+ * effect in -- the gate still works and still navigates, it simply cuts
+ * rather than dissolving.  A driving game that will not leave the road
+ * because its post stack is off would be the wrong trade.
+ */
+const warp = pipeline ? new Warp(pipeline, camera) : null;
+if (warp) {
+  warp.seed = seedText;
+  warp.onArrive = (j) => {
+    /* The save first and the navigation second, both under the white-out.
+     * `Depart.navigate` forces the save through `onLeave`.  A `dry:`
+     * answer is `?nogo=1`, and `nowhere` is the home gate with no history
+     * behind it -- in both cases the page is staying, and the crossing
+     * unwinds rather than ending on a white frame. */
+    const action = depart.navigate(j.billboard);
+    return action === 'link' || action === 'back';
+  };
+  /* Back in the world, having gone nowhere.  The card is reset so the
+   * next turning still announces itself, and the gate is disarmed because
+   * the car is standing on the far side of one. */
+  warp.onStay = (j) => {
+    depart.release();
+    if (j && j.billboard.back && !depart.canGoBack()) {
+      hud.toast('nothing to go back to', simTime);
+    } else if (j) {
+      hud.toast('stayed', simTime);
+    }
+  };
+}
+
+/**
+ * The back button that does not reload.
+ *
+ * `history.back()` into this page may be served from the browser's
+ * back/forward cache, and then nothing at the top of this file runs: the
+ * page is restored exactly as it was left, which is the white-out held on
+ * its last frame with the navigation already asked for.  A white screen
+ * that never clears.
+ *
+ * So the same arrival, by hand.  The junction the crossing was taking is
+ * still in memory, so there is nothing to site -- the car is parked on
+ * that side road, the card is put away, and the crossing plays backwards
+ * from the white it was holding.  The flag is consumed as well, or the
+ * next ordinary reload would replay an arrival nobody made.
+ */
+addEventListener('pageshow', (e) => {
+  if (!e.persisted || !warp) return;
+  Warp.cameBack();
+  if (!warp.held) return;
+  const j = warp.junction;
+  depart.release();
+  if (j) parkOn(j);
+  warp.resume(car.pos);
+  /* The wall clock ran the whole time the page was away. */
+  wall.getDelta();
+});
 
 /**
  * `?sky=only`: hide everything that is not the sky.
@@ -1432,6 +1892,55 @@ if (resumable) {
   for (let i = 0; i < 4 && chase.mode !== resumable.camera; i++) chase.cycle();
 }
 car.placeOn(road, startS);
+lastS = startS;
+
+/**
+ * And where a *fresh* drive starts, which since `prompt_18.md` item 6 is
+ * not on the main road at all: parked on a side road, facing out of it,
+ * with a portal behind the car that goes back to whatever page the player
+ * came from.
+ *
+ * **Fresh only** -- or a return through a gate, which since `prompt_19.md`
+ * item 2 parks the car on the side road it left by.  A plain resume is a
+ * drive already in progress and putting it back in the car park would be
+ * a bug, not a feature, and `?start=road` forces the old behaviour for
+ * the recorder and the probes that were written against it.
+ *
+ * The home turning has to be sited *here*, before the first
+ * `chunks.flush()`, for the same reason the resume trace does: the ground
+ * under the car is about to be built, and a spur benched into it
+ * afterwards is a bellmouth in the collider and a hillside on the screen.
+ */
+const START_ON_ROAD = (params.get('start') || '') === 'road' || RECORDING;
+/**
+ * The home turning is sited on **every** boot, and only parking the car
+ * there is fresh-only.
+ *
+ * `siteHome` moves the first billboard's window to fifteen hundred feet
+ * past the home mouth, so a page that skipped it -- a resume -- scanned
+ * from a different place, ranked different windows and put the turnings
+ * somewhere else.  `prompt_19.md` item 2 is a round trip through exactly
+ * that reload, and the side road the player left by has to be there when
+ * they come back.  With this the world is a pure function of the seed
+ * again, which is the rule every other generator in it follows.
+ */
+junctions.siteHome();
+/** The side road the drive begins on, or null for the main road. */
+let startJ = null;
+if (arrival && arrival.gate !== null) {
+  /* Back through the gate it left by.  Sited now, before the first
+   * `chunks.flush()`, for the same reason the home turning is. */
+  const at = arrival.s ?? resumable.s;
+  const j = junctions.siteUntil(arrival.gate, Math.max(0, at, resumable.s) + SITING_LEAD);
+  /* The same gate in the same place, or the main road.  A world that
+   * disagrees with the page that left it gets the main road rather than a
+   * car parked on somebody else's side road. */
+  if (j && (arrival.s === null || Math.abs(j.s - arrival.s) < 1)) startJ = j;
+  else console.warn(`came back through gate ${arrival.gate}, but this world has no such turning at s = ${at}`);
+} else if (!resumable && !START_ON_ROAD) {
+  startJ = junctions.home;
+}
+if (startJ) parkOn(startJ);
 
 /* Ground under the car before the first step, not four frames later: the
  * wheels raycast, and a raycast against an empty world is a car falling. */
@@ -1442,8 +1951,12 @@ loader.step('landscape');
  * the startup trace accumulated is already accounted for.  Left unclaimed
  * it would arrive at the first frame and invalidate the entire world. */
 road.takeLaidBoxes();
+/* And the turnings sited above, for the same reason: the ground was just
+ * meshed with them in it. */
+junctions.takeNewBoxes();
 physics.syncTerrain(chunks, car.pos.x, car.pos.z);
-car.placeOn(road, startS);
+if (startJ) parkOn(startJ);
+else car.placeOn(road, startS);
 
 scatter.update(car.pos.x, car.pos.z);
 loader.step('scenery');
@@ -1484,7 +1997,37 @@ async function boot() {
    * put both back so the drive starts where the save said it did. */
   clock.t = startTime();
   clock.update();
-  car.placeOn(road, startS);
+  if (startJ) parkOn(startJ);
+  else car.placeOn(road, startS);
+  /* Where the car is now is where it starts, and the gate crossing is
+   * measured from here -- otherwise the first frame draws a segment from
+   * the origin to the car and sweeps it through whatever lies between. */
+  _prev.x = car.pos.x; _prev.z = car.pos.z;
+  /* A gate with nothing behind it is drawn cold and will not fire -- see
+   * `Depart.canGoBack`.  Asked once, here, because `history.length` does
+   * not change under a drive. */
+  if (junctions.home && !depart.canGoBack()) portals.setCold(junctions.home, true);
+
+  /**
+   * Coming out of a portal.
+   *
+   * Two ways to arrive, one animation.  Back through the browser's back
+   * button, which reloads this page and resumes the drive from the cookie
+   * -- without this the round trip would be a white flash and a hillside.
+   * And a fresh drive, which since `prompt_19.md` item 3 begins by coming
+   * out of the gate behind the car rather than by the loader fading onto
+   * a parked car.  A plain *continue* is a drive already in progress and
+   * arrives from nowhere.
+   *
+   * The car is already parked where it belongs before the first frame of
+   * it, so the prompt's *after showing the teleport-in animation* is the
+   * order the player sees: white, the world resolving out of it, and the
+   * car on the side road with the gate in the mirror.
+   */
+  if (warp && !RECORDING && params.get('warpin') !== '0') {
+    if (arrival) warp.resume(car.pos);
+    else if (startJ && !resumable) warp.arrive(car.pos);
+  }
   odometer = resumable ? resumable.odometer : 0;
   simTime = 0;
   draw();
@@ -1514,6 +2057,15 @@ window.__game = {
   scene, camera, renderer, terrain, road, chunks, scatter,
   car, chase, auto, input, hud, sky, furniture, pipeline, physics, pointer,
   sound,
+  junctions, signs, portals, depart, warp, sitingLead: SITING_LEAD,
+  /** The turning the drive started on, or null.  `tools/probe/portal.mjs`
+   *  and `park.mjs` both need to know which one it is. */
+  get home() { return junctions.home; },
+  get parkBrake() { return parkBrake; },
+  /** The arc position every consumer actually sees -- see `arcOf`.  Not
+   *  `road.nearest().s`, which is null down a side road, and emphatically
+   *  not the zero that used to stand in for it. */
+  get arc() { return lastS; },
   clock, weather, atmos, celestial, precip, headlights, save, loader, lapse,
   cloudField, clouds, touch, governor,
   /** Which tier, why, and on what -- see `core/quality.js`. */
@@ -1532,6 +2084,18 @@ window.__game = {
   get simTime() { return simTime; },
   clean(on = true) { hud.clean = on; document.body.classList.toggle('clean', on); },
   step, recording: RECORDING,
+  /**
+   * The world without the picture of it.
+   *
+   * `step` is `tick` plus `draw`, and a probe that drives a car is
+   * measuring physics, siting and triggers -- none of which the draw
+   * contributes to.  On a machine whose browser has fallen back to
+   * software rasterisation (`CHROME_GL=swiftshader`) the draw is
+   * essentially all of the cost, and `tools/probe/sign.mjs`'s drive block
+   * went from minutes to seconds by not asking for it.  Anything that
+   * wants pixels wants `present`, below.
+   */
+  tick,
   /**
    * Render inside the browser's own frame callback and resolve when it is
    * done.  `step()` on its own renders whenever the script says so, which

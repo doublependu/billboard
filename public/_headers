@@ -14,5 +14,13 @@
 /stars.bin
   Cache-Control: public, max-age=3600, must-revalidate
 
+# The billboard faces.  Named by hand in src/road/billboards.js rather than
+# content-hashed, so they revalidate like the car and the catalogue do -- and
+# unlike either of those, they are fetched on approach rather than at boot,
+# so a revalidation that costs a round trip costs it while the sign is still
+# three hundred metres away.
+/billboards/*
+  Cache-Control: public, max-age=3600, must-revalidate
+
 /index.html
   Cache-Control: public, max-age=0, must-revalidate

@@ -278,6 +278,35 @@ export class Scatter {
     this.trunks = new Map();
   }
 
+  /**
+   * Throw away the trees in a world box, so they grow back knowing what
+   * is there now.
+   *
+   * The twin of `ChunkField.invalidate`, and it exists for one reason:
+   * a turning appears in ground that has already been planted.  Siting
+   * runs a few hundred metres ahead of the car and the wood is scattered
+   * further out than that, so a junction is routinely cut through a
+   * chunk whose trees were placed when there was no side road and no
+   * billboard to see past.  Nothing else would ever move them -- a
+   * scatter chunk is built once and only dropped when it goes out of
+   * range -- and what that leaves is a conifer standing in a carriageway
+   * and a billboard nobody can read.
+   *
+   * Placement is a pure function of the chunk index, so a chunk dropped
+   * here grows back identical except for what the new exclusions take
+   * out.  Nothing else has to be remembered.
+   */
+  invalidate(minX, minZ, maxX, maxZ) {
+    for (const [k, group] of [...this.live]) {
+      const ox = group.ox, oz = group.oz;
+      if (ox === undefined) continue;
+      if (ox > maxX || ox + CHUNK < minX || oz > maxZ || oz + CHUNK < minZ) continue;
+      for (const mm of group) { this.scene.remove(mm); this.pool[mm.userData.sp].push(mm); }
+      this.live.delete(k);
+      this.trunks.delete(k);
+    }
+  }
+
   /** Woods rather than a sprinkle: a slow field gates whole hillsides. */
   _density(x, z) {
     const h = this.terrain.hm;
@@ -349,6 +378,15 @@ export class Scatter {
       // never in the road, and never so close that a branch is in the windscreen
       const q = this.road.nearest(x, z, {});
       if (q && q.d < 14) continue;
+      /* ...and never in a turning, nor in front of the sign that announces
+       * it.  `prompt_17.md` puts a billboard beside the road every
+       * thousand feet, and a billboard behind a conifer is a billboard
+       * nobody reads -- so `excludes` covers the spur corridor and a
+       * sightline box running back up the road from each face.  Read off
+       * the terrain rather than taken in the constructor, because the
+       * turnings do not exist yet when this object is built. */
+      const J = T.junctions;
+      if (J && J.excludes(x, z)) continue;
 
       /* Scrub outnumbers trees, which is what a hillside actually looks
        * like, and it is what fills the gap between the canopy line and the
@@ -376,6 +414,9 @@ export class Scatter {
       this.scene.add(inst);
       group.push(inst);
     }
+    /* The chunk's own corner, carried on the group, so `invalidate` can
+     * ask where a wood is without inverting `cellKey`'s hash. */
+    group.ox = ox; group.oz = oz;
     this.live.set(key, group);
     trunks.centre = { x: ox + CHUNK / 2, z: oz + CHUNK / 2 };
     this.trunks.set(key, trunks);

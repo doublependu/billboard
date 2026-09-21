@@ -61,6 +61,7 @@ export class Physics {
     this.terrain = new Map();     // chunk key -> { collider, chunk }
     this.rails = new Map();       // furniture batch key -> { colliders, group }
     this.trees = new Map();       // scatter chunk key -> colliders
+    this.posts = new Map();       // billboard id -> its two post colliders
 
     this.acc = 0;
     this.steps = 0;
@@ -202,6 +203,38 @@ export class Physics {
       if (list && c0 && Math.hypot(c0.x - x, c0.z - z) <= this.treeRadius + CHUNK * 1.5) continue;
       for (const c of cols) this.world.removeCollider(c, false);
       this.trees.delete(k);
+    }
+  }
+
+  /* ------------------------------ billboards --------------------------- */
+
+  /**
+   * The posts under a billboard, close in.
+   *
+   * The same shape as `syncTrees` and for the same reason: a sign you can
+   * drive through is a sign that is not there, and the panel itself is
+   * four metres up where nothing can reach it.  Two cylinders per sign,
+   * and there are never more than two or three signs inside the ring.
+   */
+  syncPosts(signs, x, z) {
+    if (!signs) return;
+    for (const [k, e] of signs.live) {
+      if (this.posts.has(k)) continue;
+      if (Math.hypot(e.cx - x, e.cz - z) > this.treeRadius + CHUNK) continue;
+      const cols = [];
+      for (const p of e.posts) {
+        cols.push(this.world.createCollider(
+          RAPIER.ColliderDesc.cylinder(p.h / 2, p.r)
+            .setTranslation(p.x, p.y + p.h / 2, p.z)
+            .setFriction(0.6)));
+      }
+      if (cols.length) this.posts.set(k, cols);
+    }
+    for (const [k, cols] of [...this.posts]) {
+      const e = signs.live.get(k);
+      if (e && Math.hypot(e.cx - x, e.cz - z) <= this.treeRadius + CHUNK * 1.5) continue;
+      for (const c of cols) this.world.removeCollider(c, false);
+      this.posts.delete(k);
     }
   }
 

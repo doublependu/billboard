@@ -378,6 +378,24 @@ export const TEX = {
     mix: (c, f, s) => 0.3 * c + 0.55 * f + 0.15 * s,
     speck: { at: 0.66, soft: 0.3, c: [176, 170, 158] },
   }),
+  /**
+   * The unsealed side roads, both of them.  `prompt_18.md` item 5.
+   *
+   * One tile under two tints rather than a gravel texture and a dirt
+   * texture, because the ground shader already takes eight samplers and
+   * the difference between a gravel track and a dirt track, at the size
+   * either is ever seen, is mostly colour and rut depth -- both of which
+   * `groundmat.js` applies on top of this.
+   *
+   * Coarser than `gravel`, which is the verge: a road surface has stones
+   * in it you could turn an ankle on, and a shoulder has chippings.
+   */
+  track: () => groundTex('track', 512, {
+    seed: 97, coarseBase: 5, fineBase: 30, spotBase: 18,
+    a: [104, 98, 88], b: [158, 150, 136],
+    mix: (c, f, s) => 0.38 * c + 0.47 * f + 0.15 * s,
+    speck: { at: 0.62, soft: 0.28, c: [182, 176, 162] },
+  }),
   sand: () => groundTex('sand', 512, {
     seed: 89, coarseBase: 3, fineBase: 28, spotBase: 14,
     a: [168, 158, 126], b: [204, 194, 162],

@@ -32,6 +32,18 @@ export class Furniture {
     this.scene = scene;
     this.T = terrain;
     this.road = road;
+    /**
+     * The turnings, so the fence can open for them.  Set by `main.js`
+     * once they exist.
+     *
+     * A guardrail through a junction mouth is a fence across the turning,
+     * and since `plan_4` the rail *is* the rule about where the player may
+     * leave the road -- `physics.syncRails` builds its colliders from the
+     * runs decided here.  So the gap in what you can see and the gap in
+     * what you can drive through are one object rather than two
+     * derivations of one rule, and there is nothing to keep in step.
+     */
+    this.junctions = null;
     this.spanNodes = opts.spanNodes ?? 26;      // 260 m per batch
     this.live = new Map();
     /* `cache: false`, because these are patched below and the material
@@ -72,6 +84,40 @@ export class Furniture {
     }
   }
 
+  /**
+   * Throw away the spans covering an arc range, so they are rebuilt.
+   *
+   * The twin of `ChunkField.invalidate` and `Scatter.invalidate`, and it
+   * exists for the third instance of one fault: **a turning is routinely
+   * sited inside furniture that has already been built.**  Siting runs
+   * `SITING_LEAD` metres ahead of the car and this class builds out to
+   * `s + 620`, so on a seed whose first billboard lands early the
+   * guardrail across its mouth was put up before the mouth existed --
+   * and nothing would ever take it down again, because `update` only
+   * builds spans it does not have.  What that looks like is a barrier
+   * across the turning, and since `plan_4` the rail is also the collider,
+   * so it is a barrier you cannot drive through either.
+   *
+   * `tools/probe/sign.mjs` found it on `alder` and counted exactly one,
+   * which is what a fault that needs a junction to be sited inside a
+   * 620 m window looks like from four seeds.
+   */
+  invalidateArc(s0, s1) {
+    const span = this.spanNodes * STEP;
+    const a = Math.floor(s0 / span), b = Math.floor(s1 / span);
+    for (let k = a; k <= b; k++) {
+      const e = this.live.get(k);
+      if (!e) continue;
+      if (e.group) {
+        this.scene.remove(e.group);
+        e.group.traverse((o) => {
+          if (o.isMesh && o.geometry !== this.postGeo) o.geometry.dispose();
+        });
+      }
+      this.live.delete(k);
+    }
+  }
+
   _build(k) {
     const span = this.spanNodes * STEP;
     const s0 = k * span;
@@ -104,7 +150,15 @@ export class Furniture {
     for (let i = i0; i <= i1; i++) {
       const n = nodes[i];
       if (!n) { want.push(0); continue; }
-      const side = n.g > FALL ? -1 : n.g < -FALL ? 1 : 0;
+      let side = n.g > FALL ? -1 : n.g < -FALL ? 1 : 0;
+      /* The mouth of a turning takes the rail out.  Zeroing `want` rather
+       * than splitting the runs by hand is the whole trick: the grouping
+       * below already turns a gap into two runs and already throws away
+       * whatever stub is left over, so this is one line and no new
+       * bookkeeping.  Junctions are only ever on the forward line, which
+       * is why the arc handed over is `i * STEP` unsigned. */
+      if (side !== 0 && !back && this.junctions
+          && this.junctions.railBlocked(i * STEP, side)) side = 0;
       want.push(back ? -side : side);
     }
 

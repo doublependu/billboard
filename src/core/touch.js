@@ -171,6 +171,16 @@ export class TouchControls {
    * The DOM
    * ------------------------------------------------------------------ */
 
+  /**
+   * Show or hide the crossing's cancel button.  `main.js` calls this
+   * every frame with `warp.active`; it is a class toggle and costs
+   * nothing to call when nothing has changed.
+   */
+  setAborting(on) {
+    if (!this.abort) return;
+    this.abort.classList.toggle('on-screen', !!on);
+  }
+
   _build() {
     const el = document.createElement('div');
     el.className = 'tc';
@@ -187,11 +197,25 @@ export class TouchControls {
       </div>
       <div class="tc-panel" id="tc-panel">
         ${PANEL.map((b, i) => `<div class="tc-btn" data-i="${i}">${b.label}</div>`).join('')}
-      </div>`;
+      </div>
+      <div class="tc-abort" id="tc-abort">stay here</div>`;
     document.body.appendChild(el);
     this.el = el;
     this.knob = el.querySelector('#tc-knob');
     this.panel = el.querySelector('#tc-panel');
+    /**
+     * The way out of a portal, on a screen with no `Esc` key.
+     *
+     * Hidden except while a crossing is playing, and that is the whole of
+     * its design: it is the only control in this game that appears and
+     * disappears, because it is the only one that means something for two
+     * seconds and nothing for the rest of the drive.  Big, central, and
+     * nowhere near the two thumbs that are driving -- a cancel you hit by
+     * accident is worse than no cancel, and this one sits where neither
+     * thumb is.
+     */
+    this.abort = el.querySelector('#tc-abort');
+    this._tap(this.abort, () => this.onCommand('menu'));
 
     this._steer(el.querySelector('#tc-steer'));
     this._pedal(el.querySelector('#tc-gas'), 'throttle');

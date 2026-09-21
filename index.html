@@ -259,6 +259,22 @@
         display: none; flex-direction: column; align-items: flex-end; gap: 7px;
       }
       .tc-panel.open { display: flex; }
+      /* The crossing's cancel.  The only control here that comes and
+         goes, because it is the only one that means anything for two
+         seconds -- and it sits high and centre, which is where neither
+         driving thumb is. */
+      .tc-abort {
+        position: absolute; left: 50%; transform: translateX(-50%);
+        top: calc(58px + env(safe-area-inset-top));
+        display: none; pointer-events: auto; touch-action: none;
+        align-items: center; justify-content: center;
+        min-width: 132px; height: 46px; padding: 0 20px; border-radius: 23px;
+        font-size: 11px; letter-spacing: .26em; text-transform: uppercase;
+        border: 1px solid rgba(255,255,255,.72);
+        background: rgba(14,22,30,.62);
+      }
+      .tc-abort.on-screen { display: flex; }
+      .tc-abort.on { background: rgba(255,255,255,.26); }
 
       /* ---------------------------------------------------------------
          The load screen.

@@ -393,6 +393,18 @@ export class Vehicle {
   }
 
   /**
+   * Put the car on a road surface that is not the midline.
+   *
+   * `placeOn` takes an arc position, which is the main road's address and
+   * nothing else's -- and since `prompt_18.md` item 6 a drive can begin
+   * parked on a side road, which has no arc position.  `y` is the road
+   * surface at that point, so the same axle clearance applies.
+   */
+  placeAt(x, y, z, yaw) {
+    this.teleport(x, y + this.m.axleHeight + 0.05, z, yaw);
+  }
+
+  /**
    * Put the body somewhere, at rest.
    *
    * `yaw` is the old convention -- the heading of `(cos yaw, sin yaw)` in

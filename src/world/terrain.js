@@ -199,6 +199,15 @@ function daylight(slope, nat, sign) {
  */
 const EARTH_FADE = 12;
 
+/**
+ * How far out the main road's platform surface is still offered to the
+ * junction stage as `deck`, and over how much of that it is eased away.
+ *
+ * See `heightAt`, and `junctions.js:height` which consumes both.
+ */
+const DECK_REACH = 30;
+const DECK_FADE = 8;
+
 function smoothstep01(t) {
   if (t <= 0) return 0;
   if (t >= 1) return 1;
@@ -313,7 +322,7 @@ function platform(q) {
 const FALL = 0.16;
 const FALL_START = 0.78 * CARRIAGEWAY;
 
-function crown(d, w) {
+export function crown(d, w) {
   const t = Math.min(1, d / CARRIAGEWAY);
   return 0.035 * (1 - t * t)
     - FALL * smoothstep01((d - FALL_START) / (w - FALL_START));
@@ -361,6 +370,14 @@ export class Terrain {
     this.hm = new Heightmap(seed, topo);
     /** Set once the road exists.  Until then the land is bare. */
     this.road = null;
+    /**
+     * Set once there are turnings.  Until then there is one road.
+     *
+     * A side road follows every billboard, and the ordering below is the
+     * whole of how a second road gets into a height field written for
+     * one.  See `road/junctions.js`.
+     */
+    this.junctions = null;
     this.roadHalfWidth = 3;
   }
 
@@ -440,11 +457,40 @@ export class Terrain {
     if (!this.road) return h;
 
     const q = this.road.nearest(x, z, _q);
-    if (!q) return h;
+    if (!q) return this.junctions ? this.junctions.height(x, z, h, null, 0) : h;
 
     const w = platform(q);
     const road = q.y + crown(q.d, w);
-    if (q.d < w) return road;
+    /**
+     * The main road's platform surface, extended sideways as if the
+     * platform were unbounded.
+     *
+     * Only the junction stage reads it, and it is the whole of why the
+     * mouth of a turning has no step in it: the bellmouth's target height
+     * is blended onto *this* with a weight that reaches exactly zero at
+     * the centreline, so across the junction the pad is not near the
+     * carriageway plane, it **is** the carriageway plane.  Continuity by
+     * identity rather than by picking a good number.
+     *
+     * Meaningless far from the road -- the carriageway plane extended
+     * forty metres sideways is nowhere near the ground -- so it is only
+     * offered inside the distance a bellmouth can reach.
+     */
+    const deck = q.d < DECK_REACH ? road : null;
+    /**
+     * ...and how much of a claim it still has.
+     *
+     * A yes-or-no at `DECK_REACH` is a step in the junction's target
+     * height wherever the blend has not already reached the spur's own
+     * surface, so the weight is eased to nothing over the last few metres
+     * instead.  Same argument as `EARTH_FADE`, one stage down: whatever is
+     * still happening where a query stops being answered is a step.
+     */
+    const deckW = deck === null ? 0
+      : 1 - smoothstep01((q.d - (DECK_REACH - DECK_FADE)) / DECK_FADE);
+    if (q.d < w) {
+      return this.junctions ? this.junctions.height(x, z, road, deck, deckW) : road;
+    }
 
     /* The fall has run its course by `w` -- that is what `crown` ends it
      * there for -- so the batter starts from the bottom of it, flat. */
@@ -507,9 +553,11 @@ export class Terrain {
 
     /* The common case by a distance: the hillside is clear of both faces,
      * so the ground is the ground and the fade below is a no-op. */
-    if (h < cut - kc && h > fill + kf) return h;
+    if (h < cut - kc && h > fill + kf) {
+      return this.junctions ? this.junctions.height(x, z, h, deck, deckW) : h;
+    }
 
-    const y = smoothMax(smoothMin(h, cut, kc), fill, kf);
+    let y = smoothMax(smoothMin(h, cut, kc), fill, kf);
 
     /* --- and out, before the road stops being asked about ---------------
      *
@@ -537,20 +585,79 @@ export class Terrain {
      * the same argument `round` above makes at the daylight line, one scale
      * up. */
     const fade = this.road.maxQuery;
-    if (q.d <= fade - EARTH_FADE) return y;
-    return y + (h - y) * smoothstep01((q.d - (fade - EARTH_FADE)) / EARTH_FADE);
+    if (q.d > fade - EARTH_FADE) {
+      y = y + (h - y) * smoothstep01((q.d - (fade - EARTH_FADE)) / EARTH_FADE);
+    }
+    /* --- and then the turnings ------------------------------------------
+     *
+     * **Strictly after**, and that ordering is the entire design.  The
+     * obvious combination -- ask both roads, take the nearer -- is a
+     * medial axis, and what this height field does when it switches
+     * between two branches instead of blending them is the bug that
+     * costs the most: the two road surfaces differ, the ground steps, and
+     * the ink pass draws the step as a line across a field.
+     *
+     * A spur benched into `y` cannot do that.  `y` is already continuous,
+     * the batter formula is continuous in its input, and the spur is
+     * built into the finished ground -- which is also, as it happens,
+     * what a side road actually is. */
+    return this.junctions ? this.junctions.height(x, z, y, deck, deckW) : y;
   }
 
   /**
-   * Where a point sits on the road, for the ground shader: signed metres
-   * across, and metres along.  Null off the road, which is most of the
-   * world and therefore worth returning cheaply.
+   * Everything the ground shader is told about one vertex, in one query.
+   *
+   *   u, s   where the point sits on the **main road** -- signed metres
+   *          across and metres along.  The marking coordinate.
+   *   d      distance to the nearest road *surface*, main or spur.  The
+   *          paving mask.
+   *   k      what that surface is made of, 0 for tarmac.
+   *   j      signed distance to the nearest junction mouth.
+   *
+   * **`u` and `s` are the main road's and nobody else's.**  Returning
+   * whichever road was nearer is right for the mask and wrong for the
+   * markings: across a bellmouth the answer flips to a frame at right
+   * angles to the first, a triangle spanning the flip interpolates
+   * between two unrelated signed offsets, and the shader paints a centre
+   * line across the junction.  Suppressing every marking near a mouth is
+   * the wrong fix -- that is the centre line vanishing as if covered by
+   * something else.
+   *
+   * Handing the shader the main road's own frame everywhere means there
+   * is nothing to suppress: a vertex near a mouth has the same marking
+   * coordinate it had before the turning existed, so the centre line and
+   * the edge lines run through the junction the way they do on a real
+   * road.  The spur is still paved, because paving is `d`, which is still
+   * whichever road is nearer.  What a spur no longer gets for free is
+   * markings -- which is what an unsealed side road wants anyway.
    */
-  roadUV(x, z) {
-    if (!this.road) return null;
+  roadPaint(x, z, o) {
+    o.u = ROAD_OFF; o.s = 0; o.d = ROAD_OFF; o.k = 0; o.j = ROAD_OFF;
+    if (!this.road) return o;
+
     const q = this.road.nearest(x, z, _q);
-    if (!q || q.d > ROAD_QUERY) return null;
-    return q;
+    const mainD = q && q.d <= ROAD_QUERY ? q.d : Infinity;
+    if (mainD !== Infinity) {
+      o.u = q.u;
+      o.s = q.s;
+      o.d = Math.min(q.d, ROAD_OFF);
+    }
+
+    /* And the turnings.  `mainD` is `Infinity` off the main road's reach,
+     * because a spur runs up to ninety-two metres and `MAX_QUERY` is
+     * forty-six: the far end of one is out of the main road's range
+     * entirely and still wants paving. */
+    const J = this.junctions;
+    if (J) {
+      const sp = J.roadUV(x, z, mainD);
+      if (sp && sp.d <= ROAD_QUERY) {
+        o.d = Math.min(sp.d, ROAD_OFF);
+        o.k = J.kindOf(sp);
+      }
+      const m = J.mouthDist(x, z);
+      if (Math.abs(m) < ROAD_OFF) o.j = m;
+    }
+    return o;
   }
 
   /**
@@ -559,7 +666,14 @@ export class Terrain {
    */
   roadProxAt(x, z) {
     if (!this.road) return 0;
-    const q = this.road.nearest(x, z, _q);
+    let q = this.road.nearest(x, z, _q);
+    /* The spur again, for the same reason and with the same rule: whoever
+     * is nearer decides.  `surfaceAt` reads this to say what the ground is
+     * made of, so without it a car on a side road is a car on grass. */
+    if (this.junctions) {
+      const sp = this.junctions.roadUV(x, z, q ? q.d : Infinity);
+      if (sp) q = sp;
+    }
     if (!q) return 0;
     const w = platform(q);
     if (q.d < w) return -1 + q.d / w * 0.2;
@@ -570,6 +684,27 @@ export class Terrain {
     const verge = 3;
     if (q.d < w + verge) return 1 - (q.d - w) / verge;
     return 0;
+  }
+
+  /**
+   * Tarmac, or something looser?
+   *
+   * `vehicle.js` reads the class out of `surfaceAt` and looks the grip up
+   * from it, so this is the whole of why a sealed, a gravel and a dirt
+   * spur are three surfaces from the driving seat and not just three
+   * colours.  A gravel or dirt spur reports the same class the verge
+   * does, and the car goes loose on it.
+   *
+   * The apron is tarmac on every turning, which is what `kindOf`'s ramp
+   * already says -- so the grip changes a few metres after the surface
+   * does, at the point where a driver can see it has.
+   */
+  _paved(x, z) {
+    const J = this.junctions;
+    if (!J) return 'road';
+    const q = J.roadUV(x, z, Infinity);
+    if (q && q.d < 6 && J.kindOf(q) > 1.5) return 'gravel';
+    return 'road';
   }
 
   /** Central-difference slope of the finished ground, per metre. */
@@ -600,7 +735,7 @@ export class Terrain {
     let cls;
     if (this.road) {
       const p = this.roadProxAt(x, z);
-      if (p < -0.2) cls = 'road';
+      if (p < -0.2) cls = this._paved(x, z);
       else if (p > 0.35) cls = 'gravel';
     }
     if (!cls) {
@@ -613,4 +748,4 @@ export class Terrain {
   }
 }
 
-const _q = { d: 0, y: 0, g: 0, gfa: 0, s: 0, px: 0, pz: 0, node: null };
+const _q = { d: 0, y: 0, g: 0, gfa: 0, s: 0, u: 0, px: 0, pz: 0, node: null };

@@ -244,6 +244,122 @@ function makeQuad(def) {
   return { quad: new FullScreenQuad(mat), mat };
 }
 
+/**
+ * Through space and time.
+ *
+ * One pass, off for the whole of every drive except the second and a bit
+ * where the car goes through a portal -- so it costs nothing at all
+ * ninety-nine per cent of the time and is allowed to be expensive.
+ *
+ * Four things happen at once, and the order they arrive in is what makes
+ * it read as travel rather than as a screen effect:
+ *
+ *   1  a **radial smear** from the gate's position on screen, growing
+ *      with `uT`.  Sixteen taps along the vector away from the centre,
+ *      which is the oldest trick in the book and still the one that says
+ *      "moving very fast" more clearly than anything else.
+ *   2  **chromatic separation** that grows with radius, so the smear
+ *      fringes into colour at the edges of the frame and stays clean
+ *      where the player is looking.
+ *   3  **starfield streaks** faded in over the second half, drawn in the
+ *      same polar frame, which is what turns a fast road into somewhere
+ *      that is not a road.
+ *   4  a **white-out** at the very end, under which the navigation
+ *      happens -- so the page that arrives does so behind a white frame
+ *      rather than behind a picture of a hillside.
+ *
+ * `uT` runs 0..1 and nothing in here reads a clock, so the whole
+ * animation is reproducible frame by frame from a probe.
+ *
+ * **It runs after the look pass, not before the grade.**  Upstream of
+ * this repository the ink and the grade were two passes and the warp went
+ * between them; here they are one, and the warp goes after it -- so the
+ * frame it smears is line work and all, which is the half of that
+ * argument worth keeping (ink drawn *on top* of a warp is a pencil
+ * drawing of a blur).  What it costs is that the maths happens in sRGB
+ * rather than in linear light, which for a smear, a fringe and a fade to
+ * white is a difference nobody can name.
+ */
+const WARP = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uT: { value: 0 },
+    uCentre: { value: new THREE.Vector2(0.5, 0.5) },
+    uAspect: { value: 1 },
+    uTint: { value: new THREE.Color(0x8fd8ff) },
+  },
+  vertexShader: VERT,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform vec2 uCentre;
+    uniform float uT, uAspect;
+    uniform vec3 uTint;
+    varying vec2 vUv;
+
+    /* A cheap hash, for the stars.  They have to be stable in the polar
+     * frame -- a starfield that shimmers is snow on a television. */
+    float hash21( vec2 p ) {
+      p = fract( p * vec2( 233.34, 851.73 ) );
+      p += dot( p, p + 23.45 );
+      return fract( p.x * p.y );
+    }
+
+    void main() {
+      vec2 d = vUv - uCentre;
+      float r = length( vec2( d.x * uAspect, d.y ) );
+
+      /* Eased so the first tenth of a second is almost still: the player
+       * has to see the gate arrive before the frame starts to move. */
+      float t = uT * uT * ( 3.0 - 2.0 * uT );
+      float pull = t * ( 0.16 + 0.55 * r );
+
+      vec3 col = vec3( 0.0 );
+      float wsum = 0.0;
+      for ( int i = 0; i < 16; i++ ) {
+        float f = float( i ) / 15.0;
+        /* Each tap samples nearer the centre than the last, so the smear
+         * trails *outward* -- the direction things go when you fly into
+         * something. */
+        vec2 uv = uCentre + d * ( 1.0 - pull * f );
+        /* Chromatic separation, opened up with the radius. */
+        float ca = t * 0.010 * r;
+        vec3 s;
+        s.r = texture2D( tDiffuse, uv + d * ca ).r;
+        s.g = texture2D( tDiffuse, uv ).g;
+        s.b = texture2D( tDiffuse, uv - d * ca ).b;
+        float w = 1.0 - f * 0.55;
+        col += s * w;
+        wsum += w;
+      }
+      col /= wsum;
+
+      /* --- the stars ---
+       * Laid out in the polar frame around the gate and stretched along
+       * the radius, so they are streaks rather than points and they run
+       * the same way the smear does. */
+      float stars = smoothstep( 0.35, 0.95, uT );
+      if ( stars > 0.001 ) {
+        float ang = atan( d.y, d.x * uAspect );
+        vec2 pol = vec2( ang * 3.6, log( max( r, 0.004 ) ) * 2.2 - uT * 5.0 );
+        float cell = hash21( floor( pol * vec2( 6.0, 3.0 ) ) );
+        float lane = fract( pol.y * 3.0 );
+        float streak = smoothstep( 0.86, 1.0, cell ) *
+                       smoothstep( 0.0, 0.35, lane ) * ( 1.0 - lane );
+        col += uTint * streak * stars * 2.2 * smoothstep( 0.06, 0.3, r );
+      }
+
+      /* --- the tunnel, and the white-out ---
+       * The gate itself blooms out from its own centre, so the last thing
+       * on screen is the thing the car drove into. */
+      float bloom = smoothstep( 0.55, 1.0, uT ) * ( 1.0 - smoothstep( 0.0, 0.55, r ) );
+      col = mix( col, uTint, bloom * 0.7 );
+      col = mix( col, vec3( 1.0 ), smoothstep( 0.86, 1.0, uT ) );
+
+      gl_FragColor = vec4( col, 1.0 );
+    }
+  `,
+};
+
 export class Pipeline {
   constructor(renderer, scene, camera, { pixelBudget = 4.2e6, maxScale = 1.75 } = {}) {
     this.renderer = renderer;
@@ -273,10 +389,17 @@ export class Pipeline {
     });
 
     this.look = makeQuad(LOOK);
+    this.warp = makeQuad(WARP);
     this.fxaa = makeQuad(FXAA);
     this.look.mat.uniforms.tDepth.value = this.rtScene.depthTexture;
     this.look.mat.defines = { INK: '', GRADE: '' };
-    this.enabled = { ink: true, grade: true, fxaa: true };
+    /* The warp is off until a car goes through a portal, which is the
+     * only reason a sixteen-tap radial blur is affordable at all -- and
+     * why its render target is not allocated until then either.  A second
+     * full-resolution buffer held for the whole of a drive is a dozen
+     * megabytes on a phone, spent on a pass that runs for two seconds. */
+    this.rtWarp = null;
+    this.enabled = { ink: true, grade: true, fxaa: true, warp: false };
     /* The daytime settings, kept so `setNight` can interpolate back to
      * them rather than accumulating drift across a game-year. */
     this.day = {
@@ -368,6 +491,8 @@ export class Pipeline {
     this.renderer.setSize(w, h, false);
     this.rtScene.setSize(rw, rh);
     this.rtB.setSize(rw, rh);
+    if (this.rtWarp) this.rtWarp.setSize(rw, rh);
+    this.warp.mat.uniforms.uAspect.value = rw / rh;
 
     const texel = new THREE.Vector2(1 / rw, 1 / rh);
     const look = this.look.mat.uniforms;
@@ -400,8 +525,20 @@ export class Pipeline {
     }
     const last = this.enabled.fxaa ? this.rtB : null;
     m.uniforms.tDiffuse.value = this.rtScene.texture;
-    r.setRenderTarget(last);
-    this.look.quad.render(r);
+    if (this.enabled.warp) {
+      /* Its own target rather than a borrowed one: the pass reads its
+       * input sixteen times, so it cannot write into the buffer it is
+       * reading. */
+      const rt = this._warpTarget();
+      r.setRenderTarget(rt);
+      this.look.quad.render(r);
+      this.warp.mat.uniforms.tDiffuse.value = rt.texture;
+      r.setRenderTarget(last);
+      this.warp.quad.render(r);
+    } else {
+      r.setRenderTarget(last);
+      this.look.quad.render(r);
+    }
     if (this.enabled.fxaa) {
       this.fxaa.mat.uniforms.tDiffuse.value = this.rtB.texture;
       r.setRenderTarget(null);
@@ -410,8 +547,39 @@ export class Pipeline {
     r.setRenderTarget(null);
   }
 
+  /**
+   * Drive the warp.  `t` is 0..1 and `centre` is where the gate is on
+   * screen, in UV.  Anything outside 0..1 turns the pass off, which is
+   * how it costs nothing for the whole of a normal drive.
+   */
+  setWarp(t, centre) {
+    const on = t > 0 && t < 1;
+    this.enabled.warp = on;
+    if (!on) return;
+    const u = this.warp.mat.uniforms;
+    u.uT.value = t;
+    if (centre) u.uCentre.value.copy(centre);
+  }
+
+  /** The warp's buffer, made on the first frame that wants one. */
+  _warpTarget() {
+    if (!this.rtWarp) {
+      /* A byte target, because the look pass has already taken the frame
+       * to sRGB by the time the warp reads it. */
+      this.rtWarp = new THREE.WebGLRenderTarget(this.size.x, this.size.y, {
+        type: THREE.UnsignedByteType,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+        stencilBuffer: false,
+        colorSpace: THREE.NoColorSpace,
+      });
+    }
+    return this.rtWarp;
+  }
+
   dispose() {
-    [this.rtScene, this.rtB].forEach((rt) => rt.dispose());
-    [this.look, this.fxaa].forEach((p) => { p.quad.dispose(); p.mat.dispose(); });
+    [this.rtScene, this.rtB, this.rtWarp].forEach((rt) => rt && rt.dispose());
+    [this.look, this.warp, this.fxaa].forEach((p) => { p.quad.dispose(); p.mat.dispose(); });
   }
 }

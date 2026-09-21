@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { groundMaterial } from './groundmat.js';
-import { ROAD_OFF, WATER_LEVEL } from './terrain.js';
+import { WATER_LEVEL } from './terrain.js';
 import { cel } from '../core/toon.js';
 
 /* ------------------------------------------------------------------ *
@@ -144,6 +144,8 @@ export function cellKey(ix, iz) { return (ix + 0x100000) * 0x200000 + (iz + 0x10
 
 const _v = new THREE.Vector3();
 const _scratch = {};
+/** One vertex's road coordinates.  See `Terrain.roadPaint`. */
+const _paint = {};
 
 export class ChunkField {
   constructor(scene, terrain, road, opts = {}) {
@@ -335,6 +337,36 @@ export class ChunkField {
      * recycled chunk missing the attribute reads zeros, and zero means
      * "you are on the carriageway", which would paint the whole chunk. */
     geo.setAttribute('roadA', new THREE.BufferAttribute(new Float32Array(w * w), 1));
+    /**
+     * Distance to the nearest junction mouth, clamped like `roadA`.
+     *
+     * It exists to break the edge line across a turning, and that is not
+     * decoration.  `roadU` is the *signed* lateral offset and it is
+     * interpolated across a triangle; if the nearer road were allowed to
+     * change from the main line to a spur whose frame is at right angles
+     * to it, an edge straddling that boundary would interpolate between
+     * two unrelated signed values -- and the shader, which paints a centre
+     * line wherever `roadU` is near zero, would draw one across the
+     * junction.  `Terrain.roadPaint` keeps the frame; this says where the
+     * mouth is, and on which side.
+     *
+     * Zero would mean "in a junction", so a recycled chunk that has never
+     * been written reads as one -- the array is filled with the sentinel
+     * on every build, below, for the same reason `roadA` is.
+     */
+    geo.setAttribute('roadJ', new THREE.BufferAttribute(new Float32Array(w * w), 1));
+    /**
+     * What the road here is made of: 0 tarmac, and `KIND` in
+     * `road/junctions.js` for the rest -- sealed, gravel, dirt.
+     *
+     * Interpolated across the triangle like everything else here, which
+     * is safe for exactly one reason: it is zero across every bellmouth
+     * and only starts to rise `KIND_FADE` metres along a spur, so no
+     * triangle ever spans two road frames *and* a change of surface.  It
+     * blends between surfaces within a spur, which is wanted -- an
+     * unsealed road does not begin at a line ruled across it.
+     */
+    geo.setAttribute('roadK', new THREE.BufferAttribute(new Float32Array(w * w), 1));
     geo.setAttribute('roadS', new THREE.BufferAttribute(new Float32Array(w * w), 1));
     geo.setAttribute('curv', new THREE.BufferAttribute(new Float32Array(w * w), 1));
     const idx = new Uint32Array(n * n * 6);
@@ -781,6 +813,8 @@ export class ChunkField {
     const nor = geo.attributes.normal.array;
     const roadU = geo.attributes.roadU.array;
     const roadA = geo.attributes.roadA.array;
+    const roadJ = geo.attributes.roadJ.array;
+    const roadK = geo.attributes.roadK.array;
     const roadS = geo.attributes.roadS.array;
     const curv = geo.attributes.curv.array;
 
@@ -825,8 +859,11 @@ export class ChunkField {
          * distance, so the road appeared only beyond about eighty metres.
          * Painted into the ground instead, it cannot z-fight with a
          * surface it *is*. */
-        const q = T.roadUV(x, z);
-        roadU[k] = q ? q.u : ROAD_OFF;
+        const q = T.roadPaint(x, z, _paint);
+        /* The *main* road's lateral offset, and never a spur's -- see
+         * `Terrain.roadPaint`, where the whole argument lives.  It is what
+         * lets the centre line run through a junction. */
+        roadU[k] = q.u;
         /* The mask, and this is the one the shader reads.  Two reasons it
          * is a separate number rather than `abs( roadU )` in the shader:
          *
@@ -847,8 +884,10 @@ export class ChunkField {
          * is 1929 of the fabrications the probe still found after the sign
          * was dealt with.  Masking on distance ends the road in a rounded
          * cap at the last node, which is where it ends. */
-        roadA[k] = q ? Math.min(q.d, ROAD_OFF) : ROAD_OFF;
-        roadS[k] = q ? q.s : 0;
+        roadA[k] = q.d;
+        roadS[k] = q.s;
+        roadJ[k] = q.j;
+        roadK[k] = q.k;
         /* Curvature is only worth sampling where it will be seen.  Four
          * extra height calls per vertex triples the cost of a 1 m chunk,
          * and at 8 m spacing the result is a 40 m Laplacian, which is not
@@ -865,6 +904,8 @@ export class ChunkField {
     geo.attributes.normal.needsUpdate = true;
     geo.attributes.roadU.needsUpdate = true;
     geo.attributes.roadA.needsUpdate = true;
+    geo.attributes.roadJ.needsUpdate = true;
+    geo.attributes.roadK.needsUpdate = true;
     geo.attributes.roadS.needsUpdate = true;
     geo.attributes.curv.needsUpdate = true;
     geo.computeBoundingSphere();
