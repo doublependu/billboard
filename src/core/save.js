@@ -5,9 +5,10 @@
  * tilde-separated fields rather than JSON -- about sixty bytes, no URI
  * encoding to read through, and legible in devtools without a parser:
  *
- *   br.save = 2~<seed>~<clock>~<arc>~<odometer>~<camera>~<autodrive>
+ *   br.save = 3~<seed>~<clock>~<arc>~<odometer>~<camera>~<autodrive>~<an>~<as>~<ac>
  *
- * `<autodrive>` is a mode *name*; see `VERSION` below for why.
+ * `<autodrive>` is a mode *name*; see `VERSION` below for why.  `<an>`,
+ * `<as>` and `<ac>` are the chain anchor; see `VERSION` for that too.
  *
  * **Tilde, not a full stop**, and that is not a style choice.  The first
  * version separated on `.` and wrote the numbers with `toFixed(1)`, so
@@ -36,6 +37,7 @@
 import { MODES, MODES_V1 } from '../car/autodrive.js';
 
 const KEY = 'br.save';
+const BEST_KEY = 'br.best';
 /**
  * Version 2 stores the autodrive mode by **name**.
  *
@@ -45,8 +47,18 @@ const KEY = 'br.save';
  * come back as full autodrive, which is the difference between a reorder
  * and a bug report. `read()` accepts both and maps a v1 index through
  * `MODES_V1`; nothing else about the record changed.
+ *
+ * Version 3 adds the **chain anchor**, `{ n, s, c }` of a turning some way
+ * behind the car (`Junctions.anchorBefore`), with `-1~0~0` for none.  It is
+ * the one derived value in here and the rule above is not broken lightly:
+ * since `prompt_4.md` the billboards loop, siting is a chain that never
+ * ends, and without the anchor a resume re-sites every turning since the
+ * start of the drive.  If a generator changes under a saved drive the
+ * anchor is as stale as the arc position beside it, and no worse.  A v2
+ * cookie reads with no anchor, which is the old behaviour: right, and
+ * slow only for a long drive.
  */
-const VERSION = 2;
+const VERSION = 3;
 const MAX_AGE = 31536000;         // a year
 
 /** Write at most this often, in seconds of wall clock. */
@@ -71,14 +83,14 @@ export class Save {
     if (!raw) return null;
     const bits = raw.split('~');
     const version = Number(bits[0]);
-    if (!(version === VERSION || version === 1) || bits.length < 7) return null;
+    if (!(version === VERSION || version === 2 || version === 1) || bits.length < 7) return null;
     const rec = {
       seed: bits[1],
       t: Number(bits[2]),
       s: Number(bits[3]),
       odometer: Number(bits[4]),
       camera: bits[5],
-      /* A name from v2; an index into the *old* order from v1. */
+      /* A name from v2 on; an index into the *old* order from v1. */
       auto: version === 1
         ? (MODES_V1[Number(bits[6]) | 0] || 'manual')
         : (MODES.includes(bits[6]) ? bits[6] : 'manual'),
@@ -92,6 +104,11 @@ export class Save {
      * origin saves a negative position.  Rejecting it here would silently
      * throw away exactly the saves the feature exists to make. */
     if (!Number.isFinite(rec.s)) return null;
+    /* The anchor is an optimisation, so a bad one is dropped rather than
+     * the save with it. */
+    const aN = Number(bits[7]), aS = Number(bits[8]), aC = Number(bits[9]);
+    rec.anchor = version >= 3 && Number.isInteger(aN) && aN >= 0 && Number.isFinite(aS)
+      ? { n: aN, s: aS, c: Number.isFinite(aC) ? aC : null } : null;
     return rec;
   }
 
@@ -110,9 +127,27 @@ export class Save {
       VERSION, rec.seed,
       rec.t.toFixed(1), rec.s.toFixed(1), rec.odometer.toFixed(1),
       rec.camera, MODES.includes(rec.auto) ? rec.auto : 'manual',
+      rec.anchor ? rec.anchor.n : -1, rec.anchor ? String(rec.anchor.s) : 0,
+      rec.anchor && Number.isFinite(rec.anchor.c) ? String(rec.anchor.c) : 0,
     ].join('~');
     set(KEY, line);
     return true;
+  }
+
+  /**
+   * The longest run, in metres -- `core/run.js`.  Its own key, because
+   * `clear` is what *new drive* calls and a new world should not wipe the
+   * record, and global rather than per seed, because a different
+   * landscape is still the same game.
+   */
+  readBest() {
+    const v = Number(get(BEST_KEY));
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  }
+
+  writeBest(metres) {
+    if (!this.available) return;
+    set(BEST_KEY, metres.toFixed(1));
   }
 
   clear() {

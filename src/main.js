@@ -38,6 +38,7 @@ import { setSeason } from './world/season.js';
 import { Headlights } from './car/lights.js';
 import { Loader, watchFocus } from './core/loader.js';
 import { Save } from './core/save.js';
+import { Run } from './core/run.js';
 import { hashFloat } from './core/rng.js';
 import { Sound } from './audio/sound.js';
 import { TIERS, pickTier, gpuName, ResolutionGovernor } from './core/quality.js';
@@ -91,12 +92,19 @@ const SEED = /^\d+$/.test(seedText) ? Number(seedText) : hashString(seedText);
  * seed is somebody else's side road in another.  `gate` is null for a
  * flag from before the id was written into it, which still plays the
  * arrival, on the main road, exactly as it used to.
+ *
+ * `gate` is a turning's **ordinal** (`Junction.n`) since the billboards
+ * loop, and the flag also carries where the chain of turnings can be
+ * picked up from to reach it and what the crossing cost the run -- see
+ * `FLAG` in `core/warp.js`.
  */
 const arrival = (() => {
   const back = Warp.cameBack();
   if (!back || !resumable) return null;
-  if (back.id === null) return { gate: null };
-  return back.seed === resumable.seed ? { gate: back.id, s: back.s } : null;
+  if (back.n === null) return { gate: null };
+  return back.seed === resumable.seed
+    ? { gate: back.n, s: back.s, anchor: back.anchor, lost: back.lost, name: back.name }
+    : null;
 })();
 
 /* --------------------------------- time ---------------------------------- *
@@ -693,7 +701,48 @@ function seasonSnow(w) {
 }
 
 let simTime = 0;
+/** Total metres this drive, as it always was: the save and the menu. */
 let odometer = 0;
+/**
+ * The game: metres since the car last stopped or went through a gate.
+ * `prompt_4.md` items 1 and 2, and the number in the bottom-left corner.
+ * See `core/run.js`.
+ */
+const run = new Run(save.readBest());
+/** What is in the store, so the best is only written when it moves. */
+let storedBest = run.best;
+/** What the crossing in progress cost, for the toast if it is refused. */
+let crossingLost = 0;
+
+/** Below this a run is not worth a sentence: rolling off the handbrake. */
+const RUN_WORTH_SAYING = 80;
+const M_PER_MILE = 1609.344;
+const milesText = (m) => (m / M_PER_MILE).toFixed(2) + ' miles';
+
+/**
+ * Write the best through, including a run still in progress -- a tab
+ * closed at mile twelve of a record was still a drive of twelve miles.
+ */
+function persistBest() {
+  if (RECORDING) return;
+  const b = Math.max(run.best, run.drive);
+  if (b > storedBest + 1) { save.writeBest(b); storedBest = b; }
+}
+
+/** The run is over, by the car stopping.  Say so, if it was a run. */
+function runStopped(d, was) {
+  persistBest();
+  if (d < RUN_WORTH_SAYING) return;
+  hud.toast((d > was ? 'new best  —  ' : 'stopped  —  ') + milesText(d), simTime, 3);
+}
+
+/** The page came back through a gate.  Say what it cost. */
+function runReturned(back) {
+  if (!back) return;
+  const cost = back.lost >= RUN_WORTH_SAYING ? '  —  ' + milesText(back.lost) : '';
+  if (back.name) hud.toast(`distracted by ${back.name}${cost}`, simTime, 4);
+  else if (cost) hud.toast(`left the road${cost}`, simTime, 4);
+}
 /** Seconds spent upside down or under water, for the automatic recover. */
 let troubleFor = 0;
 
@@ -1026,6 +1075,13 @@ function rest() {
   car.halt();
   input.axes.throttle = 0;
   input.axes.brake = 0;
+  /* Resting is stopping.  Ended here rather than left to the next frame
+   * that simulates, which is after the lapse -- the corner would show a
+   * live run through twelve hours of standing still. */
+  {
+    const was = run.best, d = run.end();
+    if (d > 0) runStopped(d, was);
+  }
 
   /* **The projection bounds the rest; a measurement ends it.**
    *
@@ -1102,6 +1158,7 @@ function rest() {
 depart.onLeave = () => {
   if (RECORDING) return;
   save.write(record(), simTime, true);
+  persistBest();
 };
 
 /**
@@ -1128,7 +1185,8 @@ depart.onLeave = () => {
  */
 function record() {
   return { seed: seedText, t: clock.t, s: lastS, odometer,
-           camera: chase.mode, auto: auto.name };
+           camera: chase.mode, auto: auto.name,
+           anchor: junctions.anchorBefore(lastS) };
 }
 
 let paused = false;
@@ -1139,6 +1197,7 @@ async function openMenu() {
    * the tab is closed. */
   if (!RECORDING) {
     save.write(record(), simTime, true);
+    persistBest();
   }
   /* The *live* state, not the saved one -- see `Loader.pause`. */
   const miles = (odometer / 1609.344).toFixed(1);
@@ -1417,7 +1476,7 @@ function tick(dt) {
     if (input.driving()) lapse.cancel();
     paintWorld(0, w, { moving: false, braking: false });
     listen(dt, w, null, true);
-    hud.update(odometer, car.speed, simTime);
+    hud.update(run.drive, car.speed, simTime, false, run.best);
     hud.setSky(`${clock.clockText}   ${clock.season.name}   ${weather.text}`);
     hud.setRest(lapse.label, lapse.progress);
     return;
@@ -1661,8 +1720,17 @@ function tick(dt) {
     ? null
     : junctions.crossedGate(_prev.x, _prev.z, car.pos.x, car.pos.z);
   if (gate && depart.commit(gate)) {
-    if (warp) warp.begin(gate, portals.centre(gate));
-    else depart.navigate(gate.billboard);
+    /* Through the ring is where the run ends -- `prompt_4.md` item 1,
+     * *without turning into a side road and leaving through a portal*.
+     * Here and not when the page leaves: `Esc` brings the car back, not
+     * the distance.  See `core/run.js`. */
+    crossingLost = run.end();
+    persistBest();
+    if (warp) {
+      warp.begin(gate, portals.centre(gate), {
+        anchor: junctions.anchorBefore(gate.s), lost: crossingLost,
+      });
+    } else depart.navigate(gate.billboard);
   }
   _prev.x = car.pos.x; _prev.z = car.pos.z;
   /* The touch screen's `Esc`.  On screen only while there is something to
@@ -1679,7 +1747,18 @@ function tick(dt) {
   if (troubleFor > 3.5) recover();
 
   odometer += Math.abs(car.speed) * dt;
-  hud.update(odometer, car.speed, simTime);
+  {
+    /* Nothing counts while the warp has the car: on the way out the run
+     * has just been ended at the ring and the car is still doing thirty
+     * through it, and on the way in it is parked.  Zero rather than
+     * skipping the call, which is also what ends nothing when there is
+     * no run. */
+    const v = warp && warp.active ? 0 : car.speed;
+    const was = run.best;
+    const d = run.update(v, dt);
+    if (d !== null) runStopped(d, was);
+    hud.update(run.drive, car.speed, simTime, run.counting(v), run.best);
+  }
   hud.setSky(`${clock.clockText}   ${clock.season.name}   ${weather.text}`);
   /* Cheap: three comparisons.  The *search* for where a rest would end
    * happens on the press, not here. */
@@ -1691,8 +1770,9 @@ function tick(dt) {
 
   /* The save, throttled to once every couple of seconds.  It stores a
    * seed and two positions and nothing derived, because everything else
-   * in the world is a pure function of those. */
-  if (!RECORDING) save.write(record(), simTime);
+   * in the world is a pure function of those -- except the chain anchor,
+   * which is derivable and too expensive to derive: see `core/save.js`. */
+  if (!RECORDING && save.write(record(), simTime)) persistBest();
 }
 
 /* --------------------------------- loop ---------------------------------- */
@@ -1734,7 +1814,11 @@ if (warp) {
     if (j && j.billboard.back && !depart.canGoBack()) {
       hud.toast('nothing to go back to', simTime);
     } else if (j) {
-      hud.toast('stayed', simTime);
+      /* Stayed -- but through the ring is through the ring, and the run
+       * ended there.  Said, because the corner reading 0.00 on its own
+       * looks like a fault. */
+      hud.toast(crossingLost >= RUN_WORTH_SAYING
+        ? 'stayed  —  the run ended at ' + milesText(crossingLost) : 'stayed', simTime, 3);
     }
   };
 }
@@ -1756,12 +1840,13 @@ if (warp) {
  */
 addEventListener('pageshow', (e) => {
   if (!e.persisted || !warp) return;
-  Warp.cameBack();
+  const back = Warp.cameBack();
   if (!warp.held) return;
   const j = warp.junction;
   depart.release();
   if (j) parkOn(j);
   warp.resume(car.pos);
+  runReturned(back);
   /* The wall clock ran the whole time the page was away. */
   wall.getDelta();
 });
@@ -1925,6 +2010,12 @@ const START_ON_ROAD = (params.get('start') || '') === 'road' || RECORDING;
  * again, which is the rule every other generator in it follows.
  */
 junctions.siteHome();
+/* And pick the chain of turnings up from where the save says, rather than
+ * re-siting every one since the start of the drive -- see
+ * `Junctions.resumeFrom`.  A return through a gate uses the gate's own
+ * anchor, which is guaranteed to be behind it. */
+junctions.resumeFrom(arrival && arrival.gate !== null ? arrival.anchor
+  : resumable ? resumable.anchor : null);
 /** The side road the drive begins on, or null for the main road. */
 let startJ = null;
 if (arrival && arrival.gate !== null) {
@@ -2030,6 +2121,7 @@ async function boot() {
   }
   odometer = resumable ? resumable.odometer : 0;
   simTime = 0;
+  runReturned(arrival);
   draw();
   loader.step('settling');
 
@@ -2081,6 +2173,8 @@ window.__game = {
   /** Put the clock somewhere, for the probes and for `?t`. */
   setTime(hours) { clock.setTimeOfDay(hours); },
   get odometer() { return odometer; },
+  /** The run -- `core/run.js` -- for `perf-bench/run.mjs`. */
+  run,
   get simTime() { return simTime; },
   clean(on = true) { hud.clean = on; document.body.classList.toggle('clean', on); },
   step, recording: RECORDING,
@@ -2184,6 +2278,7 @@ window.__game = {
     car.placeOn(road, metres);
     chunks.reset();
     odometer = metres;
+    run.drive = 0;
     chase.started = false;
     for (let i = 0; i < settle; i++) {
       step(1 / 30);

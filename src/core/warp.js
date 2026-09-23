@@ -59,6 +59,20 @@ const BACK_DURATION = 1.1;
  * main road's query radius, and its saved position is the main road's
  * nearest point rather than the mouth.  A bare `'1'` is what a tab open across the deploy holds, and
  * it still means "came back" -- just not from where.
+ *
+ * Since `prompt_4.md` the list of billboards loops, so an id no longer
+ * names one gate and the flag carries three more things:
+ *
+ *   n       which turning, counted in siting order.  What the page that
+ *           comes back actually asks for.
+ *   a       where the chain of turnings can be picked up from to reach
+ *           it quickly -- `Junctions.anchorBefore`, `{ n, s, c }` or null.
+ *   lost    how far the run had gone when the car went through, so the
+ *           page that comes back can say what the portal cost.  `name`
+ *           is the billboard's, for the same sentence.
+ *
+ * A flag with no `n` is from a tab that left before the list looped, when
+ * billboard `k` was always turning `k - 1` and id 0 was home.
  */
 const FLAG = 'br_portal';
 
@@ -102,8 +116,11 @@ export class Warp {
    *  What a back/forward-cache restore finds -- see `main.js`. */
   get held() { return this.dir > 0 && this.arrived; }
 
-  /** Go.  `at` is where the gate is in the world, for the camera work. */
-  begin(j, at) {
+  /**
+   * Go.  `at` is where the gate is in the world, for the camera work;
+   * `anchor` and `lost` ride along in the flag -- see `FLAG`.
+   */
+  begin(j, at, { anchor = null, lost = 0 } = {}) {
     if (this.active) return;
     this.junction = j;
     this.dir = 1;
@@ -113,7 +130,8 @@ export class Warp {
     if (at) this.target.copy(at);
     try {
       sessionStorage.setItem(FLAG, JSON.stringify({
-        seed: this.seed, id: j.billboard.id, s: +j.s.toFixed(2),
+        seed: this.seed, n: j.n, id: j.billboard.id, s: +j.s.toFixed(2),
+        a: anchor, lost: +lost.toFixed(1), name: j.billboard.back ? null : j.billboard.name,
       }));
     } catch { /* private window */ }
   }
@@ -134,10 +152,17 @@ export class Warp {
     try {
       const v = JSON.parse(raw);
       if (v && typeof v === 'object' && Number.isFinite(v.id)) {
-        return { seed: String(v.seed), id: v.id, s: Number.isFinite(v.s) ? v.s : null };
+        const n = Number.isFinite(v.n) ? v.n : v.id - 1;
+        const a = v.a && Number.isFinite(v.a.n) && Number.isFinite(v.a.s)
+          ? { n: v.a.n, s: v.a.s, c: Number.isFinite(v.a.c) ? v.a.c : null } : null;
+        return {
+          seed: String(v.seed), n, s: Number.isFinite(v.s) ? v.s : null, anchor: a,
+          lost: Number.isFinite(v.lost) ? v.lost : 0,
+          name: typeof v.name === 'string' ? v.name : null,
+        };
       }
     } catch { /* the old flag, or something hand-edited */ }
-    return { seed: null, id: null, s: null };
+    return { seed: null, n: null, s: null, anchor: null, lost: 0, name: null };
   }
 
   /**

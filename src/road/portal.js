@@ -151,9 +151,11 @@ export class Portals {
   update(s0, s1, dt = 0) {
     this.time += dt;
     const want = new Set();
+    /* By turning and not by billboard: since `prompt_4.md` item 4 loops
+     * the list, one billboard can have two gates standing at once. */
     for (const j of this.junctions.mouthsInRange(s0, s1)) {
-      want.add(j.billboard.id);
-      if (!this.live.has(j.billboard.id)) this._build(j);
+      want.add(j.n);
+      if (!this.live.has(j.n)) this._build(j);
     }
     for (const [id, e] of this.live) {
       if (want.has(id)) continue;
@@ -171,7 +173,7 @@ export class Portals {
    * the probes.  Null if that junction has no gate standing.
    */
   centre(j) {
-    const e = this.live.get(j.billboard.id);
+    const e = this.live.get(j.n);
     return e ? e.centre : null;
   }
 
@@ -181,7 +183,7 @@ export class Portals {
    * where the history test lives.
    */
   setCold(j, cold) {
-    const e = this.live.get(j.billboard.id);
+    const e = this.live.get(j.n);
     if (e) e.membrane.uniforms.uCold.value = cold ? 1 : 0;
   }
 
@@ -257,7 +259,7 @@ export class Portals {
 
     group.matrixAutoUpdate = false;
     this.scene.add(group);
-    this.live.set(j.billboard.id, {
+    this.live.set(j.n, {
       group,
       membrane,
       mats: [matRing, membrane, matGlow],

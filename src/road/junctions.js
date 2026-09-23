@@ -89,6 +89,26 @@ export const SPACING_MAX = 914.4;
 export const SIGN_LEAD = 120;
 
 /**
+ * The ordinal the home turning carries.  Every other turning is numbered
+ * from 0 in the order it was sited, and that number -- not the billboard's
+ * id -- is what names one turning, because since `prompt_4.md` item 4 the
+ * list loops and billboard 3 is the 3rd, 13th and 23rd turning at once.
+ */
+export const HOME_N = -1;
+
+/**
+ * How far behind the car the chain of turnings may be picked up again
+ * after a reload.  See `anchorBefore`.
+ *
+ * Past `VIEW` in `main.js` (1400 m), so every turning the player could
+ * have seen from where they were is re-sited in the same place, and far
+ * enough inside the drive that the few it costs to walk forward from
+ * there are nothing -- two or three turnings, not the hundred and forty a
+ * hundred-kilometre drive has left behind it.
+ */
+const ANCHOR_BACK = 1500;
+
+/**
  * How long a spur is, and why it is a range rather than a number.
  *
  * `prompt_18.md` item 5 asks for side roads of different lengths, and the
@@ -452,8 +472,12 @@ const _p2 = {};
  * definition.
  */
 class Junction {
-  constructor(billboard, { s, side, nodes, sign, post, x, z, y, kind, len, tier }) {
+  constructor(billboard, n, { s, side, nodes, sign, post, x, z, y, kind, len, tier }) {
     this.billboard = billboard;
+    /** Which turning this is, counted from 0 in siting order; `HOME_N`
+     *  for the home turning.  The billboard names what is *on* the sign;
+     *  this names the sign. */
+    this.n = n;
     /** Arc position of the mouth on the main line.  Always positive. */
     this.s = s;
     /** +1 or -1 across the main road's tangent: which way the spur goes. */
@@ -730,8 +754,19 @@ export class Junctions {
   constructor(terrain, road, opts = {}) {
     this.T = terrain;
     this.road = road;
+    /**
+     * Every turning, home first, **in increasing `s`** -- siting only ever
+     * walks forward and the home turning is sited before the first
+     * billboard's window opens.  The arc-window queries below lean on
+     * that order to binary-search rather than filter: since the list loops
+     * (`prompt_4.md` item 4) this array grows by about one and a half
+     * turnings a kilometre for as long as anyone drives.
+     */
     this.list = [];
-    this.byId = new Map();
+    /** Turnings by ordinal, `Junction.n`. */
+    this.byN = new Map();
+    /** The anchor `resumeFrom` restarted the chain from, or null. */
+    this.base = null;
     /**
      * Junction indices by coarse cell, so `nearest` is not a walk of the
      * whole list.
@@ -746,7 +781,8 @@ export class Junctions {
      * in the world, finds it empty.
      */
     this.grid = new Map();
-    /** Index of the next billboard in the list that has nowhere to stand. */
+    /** The ordinal the next turning will get.  Its billboard is
+     *  `BILLBOARDS[next % BILLBOARDS.length]`: the list loops. */
     this.next = 0;
     /** How far along the forward line the siting scan has looked. */
     this.cursor = SPACING_MIN;
@@ -777,8 +813,8 @@ export class Junctions {
     /**
      * The turning the drive starts on, or null.  `prompt_18.md` item 6.
      *
-     * Not in `list` until `siteHome` runs, and never in `byId` -- it
-     * carries no billboard, and `byId` is the billboard index.
+     * Not in `list` until `siteHome` runs, and never in `byN` -- it
+     * carries no billboard.  Its ordinal is `HOME_N`.
      */
     this.home = null;
     /**
@@ -853,7 +889,10 @@ export class Junctions {
   update(limit) {
     if (!this.enabled) return;
     let guard = 0;
-    while (this.next < BILLBOARDS.length && this.cursor <= limit && guard++ < 90) {
+    /* No end to the list any more: `prompt_4.md` item 4 loops it, so the
+     * only thing that stops siting is running out of protected road. */
+    if (!BILLBOARDS.length) return;
+    while (this.cursor <= limit && guard++ < 90) {
       const s = this.cursor;
       this.cursor += SCAN_STEP;
 
@@ -887,6 +926,10 @@ export class Junctions {
          * drag the rest of the list along behind it. */
         this.target = j.s + SPACING_MIN;
         this.cursor = Math.max(this.cursor, this.target);
+        /* Where the next window's scan starts, which is *not* always
+         * `target`: see `resumeFrom`.  Kept on the turning so an anchor
+         * can hand it on. */
+        j.cursor = this.cursor;
         this.window.length = 0;
         this.windowFailed = false;
       }
@@ -894,8 +937,8 @@ export class Junctions {
   }
 
   /**
-   * Keep siting until billboard `id` has a turning, or the scan passes
-   * `limit`.  The junction, or null.
+   * Keep siting until turning `n` exists, or the scan passes `limit`.
+   * The junction, or null.
    *
    * For the return through the back button (`prompt_19.md` item 2): the
    * page that comes back has to put the car on the side road it left by,
@@ -903,16 +946,99 @@ export class Junctions {
    * bounded to ninety steps a call so a frame never pays for more than
    * 900 m of survey; this is a loop over it with its own bound, so a
    * cookie from a very long drive costs a longer boot rather than a hang.
+   *
+   * By ordinal and not by billboard id, since the list loops -- asking
+   * for billboard 3 would find the *first* turning showing it.  And cheap
+   * however deep `n` is only because `resumeFrom` has already moved the
+   * chain up to a few turnings short of it.
    */
-  siteUntil(id, limit) {
-    if (id === 0) return this.home;
+  siteUntil(n, limit) {
+    if (n === HOME_N) return this.home;
     for (let i = 0; i < 4000; i++) {
-      const j = this.byId.get(id);
+      const j = this.byN.get(n);
       if (j) return j;
-      if (this.next >= BILLBOARDS.length || this.cursor > limit) break;
+      if (!BILLBOARDS.length || this.next > n || this.cursor > limit) break;
       this.update(Math.min(limit, this.cursor + 900));
     }
-    return this.byId.get(id) || null;
+    return this.byN.get(n) || null;
+  }
+
+  /**
+   * Where the chain of turnings can be picked up from, for a save made
+   * with the car at arc `s`: the last turning at least `ANCHOR_BACK`
+   * behind it, as `{ n, s }`, or null to start from home.
+   *
+   * **Why a save needs this at all.**  Siting is a chain: every window
+   * opens `SPACING_MIN` past the turning before it, so where turning `n`
+   * stands depends on where `n - 1` stood, all the way back to the home
+   * turning at the origin.  While the list ran out after three entries
+   * the chain did too.  Looped, it does not, and a page resuming a
+   * hundred-kilometre drive would have to re-site a hundred and forty
+   * turnings to find the one in front of the car -- a boot cost that grows
+   * with the length of the drive.
+   *
+   * With an anchor the chain restarts from a turning the save names, and
+   * that is exact rather than approximate: see `resumeFrom`.  `c` is where
+   * the scan stood when that turning was committed, and it is part of the
+   * anchor for the reason given there.
+   */
+  anchorBefore(s) {
+    const i = lowerBound(this.list, s - ANCHOR_BACK, mouthS) - 1;
+    const j = i >= 0 ? this.list[i] : null;
+    const a = j && j.n !== HOME_N ? { n: j.n, s: j.s, c: j.cursor } : null;
+    /* Never older than the anchor this page itself resumed from.  The
+     * turnings behind that were not re-sited, so until the car has driven
+     * `ANCHOR_BACK` past it the list has nothing newer to offer -- and a
+     * save written in that stretch would otherwise hand the next page the
+     * whole chain to walk again. */
+    return this.base && (!a || a.n < this.base.n) ? this.base : a;
+  }
+
+  /**
+   * Restart the chain from a saved anchor rather than from home.  Call
+   * after `siteHome` and before the first `update`.
+   *
+   * Exact, and this is the argument, because if it were not a reload
+   * would move every sign in the world:
+   *
+   *   - `_survey` and `_build` read nothing but the road and the
+   *     junction-blind landform (`bareAt`, `coarseAt`) -- never another
+   *     turning -- and every hash in `_build` is positional;
+   *   - so the whole state of the chain after turning `n` is `{ next,
+   *     target, cursor }`, and the anchor carries all three.
+   *
+   * **The cursor is the one that is easy to leave out**, and the first
+   * version did.  It is usually equal to `target` -- the window is 457.2 m
+   * wide and so is the floor, so the scan that closes one window stops
+   * where the next one opens -- but the scan walks in `SCAN_STEP`s from
+   * wherever the last window ended, and when a window's *first* candidate
+   * wins, the cursor stands up to one step past the new target.  The next
+   * window is then surveyed on a grid offset by that remainder, and a
+   * restart from `target` alone put turning 22 of `country` 2.8 m from
+   * where the drive had it -- a sign that moves on a reload, and a return
+   * through its gate that lands on the main road.  `perf-bench/loop.mjs`
+   * checks every anchor of a long drive for this.
+   *
+   * What it does *not* do is re-site the turnings behind the anchor.  They
+   * are more than `ANCHOR_BACK` back, past the view distance, and a
+   * player who turns round and drives that far will find road with no
+   * turnings on it -- which is the price of not walking the whole chain.
+   */
+  resumeFrom(anchor) {
+    if (!anchor || !this.enabled || !(anchor.n >= 0) || !Number.isFinite(anchor.s)) return;
+    if (this.list.length > (this.home ? 1 : 0)) return;
+    const target = anchor.s + SPACING_MIN;
+    if (target <= this.target) return;
+    this.base = { n: anchor.n, s: anchor.s, c: anchor.c };
+    this.next = anchor.n + 1;
+    this.target = target;
+    /* An anchor with no cursor -- hand-edited, or from before it was
+     * written -- restarts on the aligned grid, which is right nearly
+     * always and a few metres out otherwise. */
+    this.cursor = Number.isFinite(anchor.c) && anchor.c >= target && anchor.c < target + SCAN_WINDOW
+      ? anchor.c : target;
+    this.window.length = 0;
+    this.windowFailed = false;
   }
 
   /**
@@ -956,10 +1082,10 @@ export class Junctions {
       for (const { c } of ranked) {
         const site = this._build(c, short);
         if (!site) continue;
-        const b = BILLBOARDS[this.next];
-        const j = new Junction(b, site);
+        const b = BILLBOARDS[this.next % BILLBOARDS.length];
+        const j = new Junction(b, this.next, site);
         this.list.push(j);
-        this.byId.set(b.id, j);
+        this.byN.set(j.n, j);
         this._index(j);
         this.next++;
         this.newBoxes.push({ ground: j.box, clear: j.clearBox, s: j.s });
@@ -1619,6 +1745,12 @@ export class Junctions {
    */
   excludes(x, z) {
     for (const j of this.list) {
+      /* Everything below lies inside `clearBox` -- that is what the box
+       * is drawn round -- so this is exact, and it turns a walk of a list
+       * that now grows for as long as the drive does into four
+       * comparisons a turning. */
+      const cb = j.clearBox;
+      if (x < cb.minX || x > cb.maxX || z < cb.minZ || z > cb.maxZ) continue;
       if (j.boxDist(x, z) === 0) {
         const q = j.at(x, z, _hit);
         if (q && Math.abs(q.u) < SPUR_HALF + 5) return true;
@@ -1662,9 +1794,10 @@ export class Junctions {
    */
   railBlocked(s, side) {
     const half = MOUTH + 6;
-    for (const j of this.list) {
-      if (j.side !== side) continue;
-      if (Math.abs(s - j.s) < half) return true;
+    for (let i = lowerBound(this.list, s - half, mouthS); i < this.list.length; i++) {
+      const j = this.list[i];
+      if (j.s >= s + half) break;
+      if (j.side === side && Math.abs(s - j.s) < half) return true;
     }
     return false;
   }
@@ -1695,7 +1828,12 @@ export class Junctions {
    * parks in the mouth to read the sign, is sent to a website.
    */
   onSpur(x, z, yaw, speed, out = {}) {
-    for (const j of this.list) {
+    /* The cell rather than the whole list: a point inside a junction's
+     * box is in every cell that box was indexed into, and the list now
+     * grows for as long as the drive does. */
+    const list = this._cell(x, z);
+    if (!list) return null;
+    for (const j of list) {
       if (j.boxDist(x, z) > 0) continue;
       const q = j.at(x, z, _hit);
       if (!q) continue;
@@ -1738,7 +1876,13 @@ export class Junctions {
    * the ring is drawn to, so what the player sees is what fires.
    */
   crossedGate(x0, z0, x1, z1) {
-    for (const j of this.list) {
+    /* Only the junctions indexed where the car is.  A crossing is within
+     * `GATE_R` of a spur node and the box is the nodes padded by far more
+     * than that, so a car crossing a gate is inside that gate's box at
+     * both ends of the step -- and in its cell. */
+    const list = this._cell(x1, z1);
+    if (!list) return null;
+    for (const j of list) {
       const g = j.gate;
       /* Signed distance along the gate's own normal, which is the spur's
        * heading there: negative in front of the gate, positive past it. */
@@ -1792,14 +1936,29 @@ export class Junctions {
    * believe it.
    */
 
-  /** Junctions whose sign is inside the arc window, for `signs.js`. */
-  inRange(s0, s1) {
-    return this.list.filter((j) => j.sign && j.sign.s >= s0 && j.sign.s <= s1);
+  /**
+   * The turnings whose mouth is in `[s0, s1]`, by binary search on the
+   * list's order rather than a filter of all of it.  Three of these a
+   * frame, over a list that since `prompt_4.md` item 4 never stops
+   * growing.
+   */
+  _between(s0, s1) {
+    const i0 = lowerBound(this.list, s0, mouthS);
+    let i1 = i0;
+    while (i1 < this.list.length && this.list[i1].s <= s1) i1++;
+    return this.list.slice(i0, i1);
   }
 
-  /** Junctions whose fingerpost is inside the arc window, for `signs.js`. */
+  /** Junctions whose sign is inside the arc window, for `signs.js`.  A
+   *  sign stands exactly `SIGN_LEAD` before its mouth -- see `_build`. */
+  inRange(s0, s1) {
+    return this._between(s0 + SIGN_LEAD, s1 + SIGN_LEAD).filter((j) => j.sign);
+  }
+
+  /** Junctions whose fingerpost is inside the arc window, for `signs.js`.
+   *  The post is at the mouth's own arc position. */
   postsInRange(s0, s1) {
-    return this.list.filter((j) => j.post.s >= s0 && j.post.s <= s1);
+    return this._between(s0, s1);
   }
 
   /**
@@ -1811,7 +1970,7 @@ export class Junctions {
    * it actually is.
    */
   mouthsInRange(s0, s1) {
-    return this.list.filter((j) => j.s >= s0 && j.s <= s1);
+    return this._between(s0, s1);
   }
 
   /**
@@ -1885,9 +2044,13 @@ export class Junctions {
        * is the only sign here, and `prompt_18.md`'s *make it obvious which
        * way is the right direction* is what it is for. */
       site.sign = null;
-      const j = new Junction({ id: 0, name: 'Back', back: true }, site);
+      const j = new Junction({ id: 0, name: 'Back', back: true }, HOME_N, site);
       this.home = j;
-      this.list.push(j);
+      /* In `s` order like everything else in `list`.  It is always first
+       * in practice -- this runs at boot, before any other siting -- but
+       * the range queries binary-search on that order, so it is kept by
+       * construction rather than by call order. */
+      this.list.splice(lowerBound(this.list, j.s, mouthS), 0, j);
       this._index(j);
       this.newBoxes.push({ ground: j.box, clear: j.clearBox, s: j.s });
       /* Fifteen hundred feet from *here*, not from the origin, so the
@@ -1900,6 +2063,19 @@ export class Junctions {
     return null;
   }
 }
+
+/** The first index in `list` whose `key` is not below `v`.  `list` is in
+ *  increasing `key` -- see `Junctions.list`. */
+function lowerBound(list, v, key) {
+  let lo = 0, hi = list.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (key(list[mid]) < v) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+const mouthS = (j) => j.s;
 
 const _scratch = {};
 /** Per-segment scratch for `Junction.at`: where the foot of the

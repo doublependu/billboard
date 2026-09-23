@@ -11,14 +11,18 @@
  *   image   a path under `public/`, resolved through `assetUrl`
  *   link    where turning off the road takes you
  *
- * **Order is position.**  The first entry is the first sign the player
- * meets, the second is the next one after that, and so on until the list
- * runs out -- a billboard every thousand feet until there is no billboard
- * left.
+ * **Order is position, and the list loops.**  The first entry is the
+ * first sign the player meets, the second is the next one after that, and
+ * after the last one it starts again from the top (`prompt_4.md` item 4)
+ * -- so with ten entries the eleventh turning is the first billboard
+ * again, and the road never runs out of them.
  *
- * The image wants to be about 3840 x 1080 -- 32:9, which is the shape of
- * the panel.  Anything else is letterboxed into it rather than stretched,
- * so a wrong aspect is a smaller picture and never a distorted one.
+ * The image wants to be 32:9, which is the shape of the panel, and at
+ * least 2048 wide, which is what the panel's texture is composed at --
+ * 2560 x 720 to 3840 x 1080, under about 250 KB.  Anything else is
+ * letterboxed into it rather than stretched, so a wrong aspect is a
+ * smaller picture and never a distorted one.  `perf-bench/faces.mjs` makes
+ * one from the link for any entry that has none.
  *
  * **Nothing here is fetched at boot.**  A face is decoded when the arc
  * window reaches its sign, which is about three hundred metres out, and
@@ -46,5 +50,47 @@ export const BILLBOARDS = [
     name: 'Maize Maze',
     image: 'billboards/3-maize-maze.jpg',
     link: 'https://v1.maize.live/',
+  },
+  {
+    id: 4,
+    name: 'Doodle District',
+    image: 'billboards/4-doodle-district.jpg',
+    link: 'https://doodleshooter.vercel.app/',
+  },
+  {
+    id: 5,
+    name: 'Whiteout',
+    image: 'billboards/5-whiteout.jpg',
+    link: 'https://whiteout.plgb.chatgpt.site/',
+  },
+  {
+    id: 6,
+    name: 'Ink Tide',
+    image: 'billboards/6-ink-tide.jpg',
+    link: 'https://wave-racer.vercel.app/',
+  },
+  {
+    id: 7,
+    name: 'Sakura Crossing',
+    image: 'billboards/7-sakura-crossing.jpg',
+    link: 'https://sakura.gh.maize.live/',
+  },
+  {
+    id: 8,
+    name: 'Friends',
+    image: 'billboards/8-friends.jpg',
+    link: 'https://bday.maize.live/',
+  },
+  {
+    id: 9,
+    name: 'Fork me on GitHub',
+    image: 'billboards/9-github.jpg',
+    link: 'https://github.com/doublependu/billboard',
+  },
+  {
+    id: 10,
+    name: 'Cloudflare',
+    image: 'billboards/10-cloudflare.jpg',
+    link: 'https://www.cloudflare.com/',
   },
 ];

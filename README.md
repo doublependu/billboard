@@ -3,6 +3,18 @@
 An endless road through open country, traced through a procedural landscape
 and drawn as a cel-shaded picture. Built in Three.js, no engine.
 
+## The game
+
+Stay on the road for as long as you can. The number in the bottom-left corner
+is how far you have driven **without stopping** — drop below 10 mph and it goes
+back to zero — and **without turning off**: every billboard has a side road
+after it with a portal at the end, and driving through one takes you to the
+billboard's site and ends the run. Autodrive (`F`) will happily drive for ever.
+The question is whether you can leave it alone.
+
+Your best run is kept above the number, across new drives. The billboards come
+round in order and start again from the top when the list runs out.
+
 
 ```bash
 npm install
@@ -75,6 +87,11 @@ anything, including itself an hour later. `?clouds=off` puts the bare gradient
 dome back and `?clouds=full` marches the layer at full resolution. `?sky=only`
 hides the world so the frame is dome plus cloud layer and nothing else.
 `?fresh` ignores the saved drive.
+
+The billboards are a list in `src/road/billboards.js` — a name, a link and a
+32:9 picture under `public/billboards/`. `node perf-bench/faces.mjs` makes the
+picture for any entry that has none by photographing its link (a real browser,
+so WebGL pages work), at most 250 KB each.
 
 `?signs=off` takes the billboards and their turnings out of the world, which is
 how anything that measures the ground gets a before and an after. `?nogo=1`

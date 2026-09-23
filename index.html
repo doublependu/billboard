@@ -55,6 +55,17 @@
                border-bottom: 1px solid rgba(255,255,255,.45); padding: 0 .2em .10em; }
       .hud-corner i { font-style: normal; font-size: 10px; letter-spacing: .38em;
                       opacity: .72; display: block; padding-top: 5px; }
+      /* The run (`core/run.js`): dimmed while the car is under 10 mph and
+         the distance is not counting, so a parked car reads as *not yet*
+         rather than as a readout that is stuck.  The best goes *above* the
+         number, not below: the corners are anchored at the bottom, and a
+         line under one of them would lift its number out of line with the
+         speed across the screen. */
+      .hud-left .hud-n { transition: opacity .4s ease; }
+      .hud-left.idle .hud-n { opacity: .45; }
+      .hud-corner .hud-best { display: block; font-size: 9px; letter-spacing: .30em;
+                              opacity: .55; padding: 0 0 6px; }
+      .hud-best:empty { display: none; }
       /* The top stack -- hint, mode, sky, rest -- in flow order inside one
          positioned column, rather than four blocks each pinned to its own
          `top`.  Four fixed offsets only line up while every block is
@@ -136,6 +147,7 @@
       body.touch .hud-right { right: auto; left: calc(50% + 13px); }
       body.touch .hud-n { font-size: 20px; }
       body.touch .hud-corner i { font-size: 9px; padding-top: 3px; }
+      body.touch .hud-corner .hud-best { font-size: 8px; padding: 0 0 4px; }
       body.touch .hud-toast { bottom: calc(184px + env(safe-area-inset-bottom)); }
       /* Held sideways there is nothing between the two thumbs at all, so
          the pair drops to the bottom edge where it belongs. */
@@ -298,6 +310,11 @@
       }
       .load h1 { margin: 0 0 4px; font-size: 15px; font-weight: 400;
                  letter-spacing: .52em; text-indent: .52em; opacity: .95; }
+      /* The goal, which nothing else in the game states.  `prompt_4.md`
+         item 1: the drive is scored now, and a score nobody was told the
+         rules of is a number in the corner. */
+      .load-goal { margin: 0 0 14px; font-size: 10px; letter-spacing: .24em;
+                   opacity: .78; max-width: 32em; padding: 0 16px; line-height: 1.7; }
       .load-step { margin: 0; font-size: 10px; letter-spacing: .30em;
                    opacity: .5; min-height: 1.2em; }
       .load-bar { width: 210px; height: 1px; margin: 26px 0 0;
@@ -336,6 +353,7 @@
     <canvas id="view" tabindex="0"></canvas>
     <div class="load" id="load">
       <h1>country road</h1>
+      <p class="load-goal">stay on the road as long as you can &mdash; don&rsquo;t stop, don&rsquo;t turn off</p>
       <p class="load-step" id="load-step">warming up</p>
       <div class="load-bar"><i id="load-fill"></i></div>
       <p class="load-go" id="load-go">click or press any key to drive</p>

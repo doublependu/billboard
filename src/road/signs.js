@@ -23,10 +23,11 @@ import { patchClouds } from '../world/cloudfield.js';
  * panel is seen from.
  *
  * Lifetime is `Furniture`'s: built when the arc window reaches them,
- * disposed behind the car, and rebuilt on the way back.  So the decoded
- * image is cached by billboard id and the composition is not repeated --
- * a player driving up and down the same mile would otherwise recompose
- * the same 2048 x 816 canvas every few seconds.
+ * disposed behind the car, and rebuilt on the way back.  So the composed
+ * face is cached and not repeated -- a player driving up and down the
+ * same mile would otherwise recompose the same 2048 x 816 canvas every
+ * few seconds.  See `faces` for what the cache is keyed on and why it is
+ * no longer allowed to keep everything.
  * ------------------------------------------------------------------ */
 
 /** The panel, in metres.  The picture is 32:9, which is the shape the
@@ -45,10 +46,46 @@ const TEX_W = 2048;
 const PIC_PX = Math.round(TEX_W * PIC_H / PANEL_W);
 const CAP_PX = Math.round(TEX_W * CAP_H / PANEL_W);
 
-/** Decoded images and composed faces, by billboard id.  Never evicted:
- *  there are as many as there are billboards, and they are the whole
- *  reason the player is looking at any of this. */
+/**
+ * Composed faces, by billboard id **and side**, least recently used first.
+ *
+ * The side is in the key because it is in the picture: `NEXT LEFT` or
+ * `NEXT RIGHT` is drawn into the texture.  While every billboard stood
+ * exactly once that was the same thing as the id.  Since the list loops
+ * (`prompt_4.md` item 4) the same billboard comes round again, often on
+ * the other side of the road, and a face cached by id alone pointed the
+ * player the wrong way.
+ *
+ * And it is bounded.  It said "never evicted" when there were three
+ * billboards; one face is 2048 x 816 RGBA with its mips, about 8.9 MB of
+ * GPU memory, and ten billboards on two sides is twenty of them kept for
+ * the whole visit -- 180 MB, on a phone.  Signs are at least 457 m apart
+ * and a face is built about 300 m out, so no more than two are ever on
+ * the road at once; `FACE_CAP` keeps a couple more so the one just passed
+ * survives a U-turn.  An evicted face costs, next time, one fetch from the
+ * HTTP cache, one decode and one canvas draw, all of it three hundred
+ * metres before anyone can read the result.
+ */
 const faces = new Map();
+const FACE_CAP = 4;
+
+function faceKey(billboard, side) { return billboard.id + ':' + (side < 0 ? 'L' : 'R'); }
+
+/**
+ * Drop the least recently used faces past `FACE_CAP`, never one a live
+ * sign is showing and never one still waiting on its image -- that entry
+ * has callbacks queued against materials that are on screen.
+ */
+function trimFaces(inUse) {
+  let over = faces.size - FACE_CAP;
+  for (const [k, e] of faces) {
+    if (over <= 0) break;
+    if (inUse.has(k) || !e.tex) continue;
+    e.tex.dispose();
+    faces.delete(k);
+    over--;
+  }
+}
 
 /**
  * Draw the picture, the name and the direction into one canvas.
@@ -135,9 +172,13 @@ function compose(billboard, img, side) {
  * blank panel for the first second of every approach.
  */
 function faceFor(billboard, side, onReady) {
-  const key = billboard.id;
+  const key = faceKey(billboard, side);
   let e = faces.get(key);
   if (e) {
+    /* Most recently used goes to the back of the map, which is the end
+     * `trimFaces` reaches last. */
+    faces.delete(key);
+    faces.set(key, e);
     if (e.tex) onReady(e.tex);
     /* Still decoding.  Join the queue rather than dropping the callback:
      * a sign is built and disposed every time the player passes it, so
@@ -147,7 +188,7 @@ function faceFor(billboard, side, onReady) {
     else e.waiting.push(onReady);
     /* **The composed face first, and the placeholder only if there is no
      * composed face yet.**  It read `e.placeholder || e.tex`, and the
-     * placeholder is never cleared -- so the *second* time a billboard
+     * placeholder was never cleared then -- so the *second* time a billboard
      * was built, the callback above set the real picture and then the
      * caller overwrote it with the caption-only placeholder on the very
      * next line.  Every sign the player drove back to was a black panel
@@ -166,6 +207,11 @@ function faceFor(billboard, side, onReady) {
     e.tex = compose(billboard, img, side);
     for (const cb of e.waiting) cb(e.tex);
     e.waiting.length = 0;
+    /* Everything that was showing the placeholder has just been handed
+     * the picture, so the placeholder is a second 2048 x 816 canvas that
+     * nothing can see.  Let it go. */
+    e.placeholder.dispose();
+    e.placeholder = null;
   };
   img.onerror = () => {
     /* A missing image is a real thing that will happen to whoever edits
@@ -338,26 +384,34 @@ export class Signs {
      * junction has a billboard *and* a fingerpost, and they stand in
      * different places along the road so they come into range at
      * different times. */
+    /* Keyed by the *turning*, `j.n`, and not by the billboard on it:
+     * since the list loops, two turnings can carry the same billboard,
+     * and with a short enough list both are in the window at once. */
     const want = new Set();
     for (const j of this.junctions.inRange(s0, s1)) {
-      const k = 'face:' + j.billboard.id;
+      const k = 'face:' + j.n;
       want.add(k);
       if (!this.live.has(k)) this._build(j, k);
     }
     for (const j of this.junctions.postsInRange(s0, s1)) {
-      const k = 'post:' + j.billboard.id;
+      const k = 'post:' + j.n;
       want.add(k);
       if (!this.live.has(k)) this._fingerpost(j, k);
     }
     for (const [id, e] of this.live) {
       if (want.has(id)) continue;
       this.scene.remove(e.group);
-      /* The face texture is *not* disposed: it is cached by id in
-       * `faces`, shared with the next build, and re-composing it is a
-       * 2048 x 816 canvas draw. */
+      /* The face texture is *not* disposed here: it is cached in
+       * `faces`, shared with the next build, and `trimFaces` below is
+       * what decides when it goes. */
       e.mat.dispose();
       this.faceMats = this.faceMats.filter((m) => m !== e.mat);
       this.live.delete(id);
+    }
+    if (faces.size > FACE_CAP) {
+      const inUse = new Set();
+      for (const e of this.live.values()) if (e.face) inUse.add(e.face);
+      trimFaces(inUse);
     }
   }
 
@@ -450,7 +504,8 @@ export class Signs {
 
     group.matrixAutoUpdate = false;
     this.scene.add(group);
-    this.live.set(key, { group, mat, posts, cx: s.x, cz: s.z });
+    this.live.set(key, { group, mat, posts, cx: s.x, cz: s.z,
+                         face: faceKey(j.billboard, s.side) });
   }
 
   /**
@@ -544,4 +599,8 @@ export class Signs {
 
   /** The posts, for `physics.syncPosts`. */
   get trunks() { return this.live; }
+
+  /** How many composed faces are held, for `perf-bench/loop.mjs`.  At
+   *  most `FACE_CAP` once every image has landed. */
+  get faceCount() { return faces.size; }
 }

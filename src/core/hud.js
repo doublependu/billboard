@@ -46,7 +46,7 @@ export class Hud {
     this.el = document.createElement('div');
     this.el.className = 'hud';
     this.el.innerHTML = `
-      <div class="hud-corner hud-left"><b class="hud-n" id="hud-dist">0.0</b><i>miles</i></div>
+      <div class="hud-corner hud-left idle" id="hud-run"><span class="hud-best" id="hud-best"></span><b class="hud-n" id="hud-dist">0.00</b><i>miles</i></div>
       <div class="hud-corner hud-right"><b class="hud-n" id="hud-spd">0</b><i>mph</i></div>
       <div class="hud-stack">
         <p class="hud-hint" id="hud-hint"></p>
@@ -59,6 +59,8 @@ export class Hud {
       <p class="hud-focus" id="hud-focus">click to drive</p>`;
     root.appendChild(this.el);
     this.dist = this.el.querySelector('#hud-dist');
+    this.runEl = this.el.querySelector('#hud-run');
+    this.bestEl = this.el.querySelector('#hud-best');
     this.spd = this.el.querySelector('#hud-spd');
     this.hint = this.el.querySelector('#hud-hint');
     this.modeEl = this.el.querySelector('#hud-mode');
@@ -75,6 +77,8 @@ export class Hud {
     this._toastUntil = 0;
     this._lastSpd = -1;
     this._lastDist = '';
+    this._lastBest = '';
+    this._idle = true;
     this._lastSky = '';
     this._lastCam = '';
   }
@@ -185,10 +189,26 @@ export class Hud {
     this._clean = on;
   }
 
-  update(metres, speedMs, now) {
+  /**
+   * The bottom-left number is the **run** -- `core/run.js` -- and not the
+   * odometer any more: `prompt_4.md` item 2, distance driven without
+   * stopping.  Two decimals, which is sixteen metres a tick and about one
+   * a second at cruise; at one decimal a live run sat still for eight
+   * seconds at a time and read as stuck.
+   *
+   * `counting` dims it while the car is under the line, and `best` is the
+   * record above it, empty until there is one.
+   */
+  update(metres, speedMs, now, counting = true, best = 0) {
     if (this._clean || !this.visible) return;
-    const mi = (metres / M_PER_MILE).toFixed(1);
+    const mi = (metres / M_PER_MILE).toFixed(2);
     if (mi !== this._lastDist) { this.dist.textContent = mi; this._lastDist = mi; }
+    const b = best > 0 ? 'best ' + (best / M_PER_MILE).toFixed(2) : '';
+    if (b !== this._lastBest) { this.bestEl.textContent = b; this._lastBest = b; }
+    if (!counting !== this._idle) {
+      this._idle = !counting;
+      this.runEl.classList.toggle('idle', this._idle);
+    }
     const mph = Math.round(Math.abs(speedMs) * 2.23694);
     if (mph !== this._lastSpd) { this.spd.textContent = String(mph); this._lastSpd = mph; }
     if (this._toastUntil && now > this._toastUntil) {

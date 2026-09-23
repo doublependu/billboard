@@ -373,3 +373,101 @@ the same arrival by hand.
 
 
 
+
+---
+---
+
+# next_4, part 2 — what landed for `prompt_4.md`
+
+Implements `ai/plan_4.md`.  Everything in it landed, with one correction to
+its argument (§3 below), which the plan's own probe caught.
+
+**Landed**
+
+| file | what |
+|---|---|
+| `src/core/run.js` | new — the run: counts above 10 mph, ends below it or at a ring, keeps the best |
+| `src/main.js` | the run wired into the frame, rest, the crossing, the save and the return; the chain resumed from the saved anchor |
+| `src/core/hud.js`, `index.html` | the corner shows the run to two decimals, dimmed while not counting, the best above it; the goal line on the load screen |
+| `src/core/save.js` | v3: the chain anchor `~n~s~c`; `br.best` in its own key |
+| `src/core/warp.js` | the flag carries the ordinal, the anchor, what the run lost and the billboard's name |
+| `src/road/junctions.js` | the loop; ordinals (`Junction.n`, `byN`, `HOME_N`); `anchorBefore` / `resumeFrom`; binary-searched range queries; per-cell spur and gate tests; `clearBox` pre-test in `excludes` |
+| `src/road/signs.js` | faces keyed by id **and side**, LRU of 4, placeholder freed once the picture lands; live signs keyed by ordinal |
+| `src/road/portal.js` | live gates keyed by ordinal |
+| `src/road/billboards.js` | seven entries, ids 4–10, and the loop documented |
+| `public/billboards/4..10-*.jpg` | new, 59–254 KB; `2-central-park-paintball.jpg` 798 → 220 KB |
+| `perf-bench/faces.mjs` | new — photographs a link into a 32:9 face, or sets a type card |
+| `perf-bench/loop.mjs`, `perf-bench/run.mjs` | new — plan §8 and §5 |
+| `README.md` | "The game", and how billboard pictures are made |
+
+## 1. Measured
+
+`perf-bench/run.mjs`, `MINUTES=20`, seeds `country`, `alder`, `billboard`:
+
+| seed | run after 20 game-min | slowest while counting |
+|---|---|---|
+| country | 13.72 mi, never ended | 18.2 mph |
+| alder | 13.71 mi, never ended | 17.7 mph |
+| billboard | 13.71 mi, never ended | 17.8 mph |
+
+So autodrive has about 8 mph of margin over the line on these seeds, and no
+debounce was needed.  Braking ends a run on the frame the speed crosses
+10 mph; a gate ends it on the crossing frame; staying says so; a fresh
+drive starts at `0.00`, dimmed.
+
+`perf-bench/loop.mjs`, `country` and `alder`, 34 turnings each: ids run
+`1..10` three and a half times; no gap under `SPACING_MIN`, none over
+`SPACING_MAX`; **every anchor 0..31 reproduces the two turnings after it
+exactly**; the face cache peaks at 4; with a one-entry list two signs of the
+same billboard stand together and a left and a right one never share a
+face; a return through turning 23 sites **2** turnings, not 24, parks the
+car on 23's spur and puts it within 1e-6 m of where the first page had it.
+
+`npm run build` clean; `index` 96 → 98 KB gzip.
+
+## 2. Decisions taken on the plan's open questions
+
+The user said "implement this" with the plan's three questions open, so
+its defaults went in: pictures photographed from the links for the five
+games (Ink Tide with its dimming `#hud` canvas hidden, since at 250 m it
+was a black panel), type cards for GitHub ("fork me", a branch glyph, the
+repo path) and Cloudflare ("this road is served from the edge", a generic
+cloud — no logos); `Esc` does not give the run back; "GitHub" with the
+capital H.  All three are one-line reversals and worth confirming.
+
+## 3. The correction: the anchor needs the scan cursor
+
+`plan_4.md` §7d argued that after every commit `cursor === target`, so an
+anchor of `{ n, s }` restarts the chain exactly.  It does not hold.  The
+scan walks in 10 m steps from wherever the last window ended, and when a
+window's *first* candidate wins the cursor stands up to a step past the new
+target, so the next window is surveyed on an offset grid.  Restarting from
+`target` put turning 22 of `country` 2.8 m from where the drive had it — a
+sign that moves on reload, and a return through its gate that lands on the
+main road.  The in-page check from one anchor happened to pass; the
+cross-page return check failed, and the road was proved identical between
+the two pages before the siting was blamed.
+
+The anchor is now `{ n, s, c }`, `c` recorded on the junction at commit, and
+`loop.mjs` checks every anchor rather than one.
+
+## 4. Two small things the probes turned up
+
+* The run restarted on the crossing frame itself, since the car goes
+  through the ring at ~29 mph.  Nothing counts while the warp has the car.
+* `faces.mjs` has to step *size* as well as quality: Ink Tide's ocean is
+  267 KB at q 40 at 3840 wide.  It falls back to 2560 × 720, which is still
+  above the 2048 px the panel is composed at.  `billboards.js` now asks for
+  "32:9, at least 2048 wide" rather than "about 3840 × 1080".
+
+## 5. Next, in the order I would do them
+
+1. **Confirm the three defaults** in §2, and look at the seven pictures —
+   they are photographs of other people's landing screens as they were on
+   2026-09-23.
+2. **The backward road has no billboards** (`plan_4.md` §10).  With a scored
+   game it is now an exploit: U-turn at the start and nothing tempts you.
+3. **Frame time on a phone** — still owed from `next_3`, and this iteration
+   adds a face decode of up to 3840 px on the main thread every ~700 m.
+4. The items from part 1 §10 that this did not touch: `streak.mjs`'s far
+   bucket, `nearest` on a tight bend, `clouds.js` behind a dynamic import.
