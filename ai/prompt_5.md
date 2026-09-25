@@ -11,4 +11,4 @@ git rebase upstream/main
 resolve any conflict and pass all tests
 
 
-
+Note: if you think a merge is more suitable than a rebase then you can choose to do that too. 
